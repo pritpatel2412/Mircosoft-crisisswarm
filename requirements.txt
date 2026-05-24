@@ -1,4 +1,4 @@
-pyautogen==0.2.38
+pyautogen
 semantic-kernel
 streamlit
 azure-ai-projects
@@ -6,3 +6,5 @@ azure-maps-route
 azure-identity
 python-dotenv
 openai
+pydeck
+pandas

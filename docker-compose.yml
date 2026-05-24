@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  crisisswarm:
+    build: .
+    container_name: crisisswarm_dashboard
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app
+    # If using Windows, might want to comment out volumes if it causes hot-reload issues or use specific configurations.

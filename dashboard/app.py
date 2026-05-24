@@ -160,4 +160,4 @@ if st.button("ACTIVATE SWARM", key="start_swarm"):
         st.json(out.get("comms"))
 
 else:
-    st.write("Click 'Start Swarm Run' to activate the agents for the provided scenario.")
+    st.write("Click 'ACTIVATE SWARM' to activate the agents for the provided scenario.")

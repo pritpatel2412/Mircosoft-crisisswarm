@@ -25,13 +25,9 @@ class Settings:
 
 	All credentials must be supplied by the environment in production.
 	"""
-	AZURE_OPENAI_ENDPOINT: Optional[str] = None
-	AZURE_OPENAI_KEY: Optional[str] = None
+	GROQ_API_KEY: Optional[str] = None
+	GROQ_MODEL: Optional[str] = "llama3-70b-8192"
 	AZURE_MAPS_KEY: Optional[str] = None
-	AZURE_CLIENT_ID: Optional[str] = None
-	AZURE_CLIENT_SECRET: Optional[str] = None
-	AZURE_TENANT_ID: Optional[str] = None
-	AZURE_OPENAI_DEPLOYMENT: Optional[str] = "gpt-4o"
 	STREAMLIT_PORT: Optional[int] = 8501
 	SERVICE_NAME: Optional[str] = "CrisisSwarm"
 
@@ -49,20 +45,16 @@ def load_settings() -> Settings:
 		return val
 
 	s = Settings(
-		AZURE_OPENAI_ENDPOINT=getenv("AZURE_OPENAI_ENDPOINT"),
-		AZURE_OPENAI_KEY=getenv("AZURE_OPENAI_KEY"),
+		GROQ_API_KEY=getenv("GROQ_API_KEY"),
+		GROQ_MODEL=getenv("GROQ_MODEL") or "llama3-70b-8192",
 		AZURE_MAPS_KEY=getenv("AZURE_MAPS_KEY"),
-		AZURE_CLIENT_ID=getenv("AZURE_CLIENT_ID"),
-		AZURE_CLIENT_SECRET=getenv("AZURE_CLIENT_SECRET"),
-		AZURE_TENANT_ID=getenv("AZURE_TENANT_ID"),
-		AZURE_OPENAI_DEPLOYMENT=getenv("AZURE_OPENAI_DEPLOYMENT") or "gpt-4o",
 		STREAMLIT_PORT=int(getenv("STREAMLIT_PORT", 8501)),
 		SERVICE_NAME=getenv("SERVICE_NAME", "CrisisSwarm"),
 	)
 
 	# Basic sanity warning (does not reveal secrets)
-	if not s.AZURE_OPENAI_ENDPOINT or not s.AZURE_OPENAI_KEY:
-		print("WARNING: Azure OpenAI endpoint/key not set. Set via environment variables or .env file.")
+	if not s.GROQ_API_KEY:
+		print("WARNING: Groq API key not set. Set GROQ_API_KEY via environment variables or .env file.")
 
 	return s
 
@@ -86,5 +78,5 @@ def require_env_or_raise(name: str) -> str:
 if __name__ == "__main__":
 	# quick local check
 	print("Loaded settings (redacted):")
-	print("AZURE_OPENAI_ENDPOINT:", "set" if settings.AZURE_OPENAI_ENDPOINT else "NOT SET")
+	print("GROQ_API_KEY:", "set" if settings.GROQ_API_KEY else "NOT SET")
 	print("AZURE_MAPS_KEY:", "set" if settings.AZURE_MAPS_KEY else "NOT SET")

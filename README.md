@@ -1,50 +1,65 @@
 # CrisisSwarm
+**Microsoft Build AI Hackathon 2026 Submission**
+**Track:** Theme 05 - Agent Swarms
 
-CrisisSwarm is a Multi-Agent Disaster Response System built for the Microsoft Build AI Hackathon 2026.
-It uses Microsoft AutoGen, Semantic Kernel, Azure OpenAI, Azure Maps, and Streamlit to simulate a swarm of 6 coordinated agents handling disasters.
+CrisisSwarm is a scalable, containerized Multi-Agent Disaster Response System designed to handle chaotic, multi-variable emergency scenarios. A single agent cannot route ambulances, perform medical triage, and notify families simultaneously without hallucinating. CrisisSwarm solves this by orchestrating a specialized swarm of agents that collaborate, self-organize, and double-check each other's work.
 
-## Project Structure
+## 🧠 Architecture Overview
 
-- `agents/`
-  - `commander.py` — Master orchestrator that delegates tasks to other agents.
-  - `triage.py` — Classifies victims into Critical / Serious / Minor.
-  - `resource.py` — Allocates ambulances, food, water, and medical teams.
-  - `routing.py` — Finds safest routes using Azure Maps.
-  - `comms.py` — Sends alerts to responders and families.
-  - `reporter.py` — Generates situation reports every 15 minutes.
-- `core/`
-  - `swarm.py` — GroupChat orchestration for agent collaboration.
-  - `scenario.py` — Disaster scenario loader and simulator.
-- `dashboard/`
-  - `app.py` — Streamlit dashboard UI for live conversation logs and status.
-- `config.py` — Configuration loader (loads secrets from environment variables).
-- `requirements.txt` — Python dependencies.
+Our architecture utilizes **Microsoft AutoGen** to create a distributed swarm. Agents communicate via an AutoGen `GroupChat`, orchestrated by a `GroupChatManager` powered by Groq's high-speed Llama 3 models.
 
-## Setup
+```mermaid
+graph TD
+    User([Emergency Dispatch]) -->|Disaster Scenario| GC[AutoGen GroupChat Manager]
+    GC <--> Planner[Commander Agent\nDelegates Tasks]
+    GC <--> Triage[Triage Agent\nClassifies Casualties]
+    GC <--> Resource[Resource Agent\nAllocates Ambulances]
+    GC <--> Router[Routing Agent\nAzure Maps Pathfinding]
+    GC <--> Comms[Comms Agent\nAlerts Responders]
+    GC <--> Reporter[Reporter Agent\nGenerates SitRep]
+```
 
-1. Create a virtual environment:
+## 🛠️ Microsoft AI Stack & Tools Used
+
+- **Microsoft AutoGen:** Orchestrates the multi-agent `GroupChat`, allowing agents to converse and solve the problem collaboratively.
+- **Groq API (Llama 3):** Powers the core intelligence, reasoning, and natural language generation of all agents at blazing speeds.
+- **Azure Maps:** Integrated into the Routing Agent to calculate safe, unblocked paths for emergency vehicles.
+- **GitHub Copilot:** Used extensively during development to accelerate boilerplate generation and debug AutoGen chat loops.
+
+## 🚀 Setup & Execution (Containerized)
+
+CrisisSwarm is fully containerized as per Theme 5 requirements.
+
+1. **Clone the repository:**
    ```bash
-   python -m venv .venv
-   .venv\Scripts\activate
+   git clone https://github.com/yourusername/crisisswarm.git
+   cd crisisswarm
    ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Create a `.env` file for your credentials:
+
+2. **Configure Environment:**
+   Create a `.env` file from the example:
    ```bash
    cp .env.example .env
    ```
-4. Add your Azure credentials inside the newly created `.env` file.
+   Add your API credentials:
+   ```env
+   GROQ_API_KEY=your-groq-api-key
+   GROQ_MODEL=llama3-70b-8192
+   ```
 
-## Next Step
+3. **Launch the Swarm:**
+   ```bash
+   docker-compose up --build
+   ```
 
-Start by building `agents/commander.py` and `agents/triage.py` first, then test them talking to each other.
+4. **Interact:**
+   Open the live UI at `http://localhost:8501`.
 
-## Demo Scenario
+## 👥 Team Members
 
-Use this scenario to test the system:
+- **Tejas** - AI Architect & Backend Engineer (AutoGen & Azure integration)
+- *[Add Team Member 2]* - Frontend Developer (Streamlit UI)
+- *[Add Team Member 3]* - Domain Expert (Disaster Response Logic)
 
-"DISASTER ALERT: 6.8 magnitude earthquake struck Mumbai at 14:32 IST. Estimated 450 casualties across 3 zones: Dharavi (200), Kurla (150), Andheri (100). 8 buildings collapsed. Western Express Highway blocked. Bandra-Worli Sea Link operational. 12 hospitals on alert. Coordinate full emergency response immediately."
-
-> Note: Run `streamlit run dashboard\app.py` after all files are complete.
+## 📦 Dependencies
+Core libraries: `pyautogen`, `azure-ai-projects`, `azure-maps-route`, `streamlit`, `openai`. (See `requirements.txt` for details).

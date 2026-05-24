@@ -59,46 +59,56 @@ def _attempt_autogen_groupchat(disaster_message: str) -> Dict[str, Any]:
         name = getattr(mod, "AGENT_NAME", mod_path.split('.')[-1])
         participants.append({"name": name, "system_message": system_msg})
 
-    # Validate Azure credentials
-    if not settings.AZURE_OPENAI_ENDPOINT or not settings.AZURE_OPENAI_KEY:
+    # Validate Groq credentials
+    if not settings.GROQ_API_KEY:
         raise RuntimeError(
-            "Azure OpenAI credentials not set. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY in environment or .env"
+            "Groq API key not set. Set GROQ_API_KEY in environment or .env"
         )
 
     try:
-        print("[Swarm] Initializing pyautogen GroupChat with Azure OpenAI")
+        print("[Swarm] Initializing pyautogen GroupChat with Groq API")
 
-        # Create a client/manager — assume pyautogen exposes an AutoGenClient.
-        # This is a reasonable current API surface: AutoGenClient(...) -> client.create_group_chat()
-        client = autogen.AutoGenClient(
-            provider="azure_openai",
-            endpoint=settings.AZURE_OPENAI_ENDPOINT,
-            api_key=settings.AZURE_OPENAI_KEY,
-            deployment=settings.AZURE_OPENAI_DEPLOYMENT,
+        llm_config = {
+            "config_list": [
+                {
+                    "model": settings.GROQ_MODEL,
+                    "api_key": settings.GROQ_API_KEY,
+                    "base_url": "https://api.groq.com/openai/v1",
+                }
+            ]
+        }
+
+        agents = []
+        for p in participants:
+            agent = autogen.AssistantAgent(
+                name=p["name"],
+                system_message=p["system_message"],
+                llm_config=llm_config
+            )
+            agents.append(agent)
+
+        user_proxy = autogen.UserProxyAgent(
+            name="user_proxy",
+            human_input_mode="NEVER",
+            max_consecutive_auto_reply=10,
+            is_termination_msg=lambda x: x.get("content", "") and x.get("content", "").rstrip().endswith("TERMINATE"),
+            code_execution_config=False,
         )
 
-        gc = client.create_group_chat()
+        groupchat = autogen.GroupChat(agents=[user_proxy] + agents, messages=[], max_round=12)
+        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=llm_config)
 
-        # Register participants with their system messages
-        for p in participants:
-            gc.add_participant(p["name"], system_message=p["system_message"])  # type: ignore
+        user_proxy.initiate_chat(
+            manager,
+            message=disaster_message
+        )
 
-        # Post the disaster message as the initiating user message
-        gc.post_user_message(disaster_message)  # type: ignore
-
-        # Run the group chat until completion. Implementation may differ by pyautogen version.
-        gc.run()  # type: ignore
-
-        # Collect a transcript of messages in the form [{'speaker': name, 'text': msg}, ...]
-        transcript_raw = gc.get_transcript()  # type: ignore
-
-        # Normalize transcript into a simple list for the dashboard
         transcript: List[Dict[str, str]] = []
-        for item in transcript_raw:
-            # Expect item to contain 'speaker' and 'text' fields; adapt if different
-            speaker = item.get("speaker") if isinstance(item, dict) else str(item[0])
-            text = item.get("text") if isinstance(item, dict) else str(item[1])
-            transcript.append({"agent": speaker, "message": text})
+        for msg in groupchat.messages:
+            transcript.append({
+                "agent": msg.get("name", "unknown"),
+                "message": msg.get("content", "")
+            })
 
         print("[Swarm] pyautogen GroupChat finished; returning transcript")
         return {"agent": "autogen_groupchat", "transcript": transcript}
