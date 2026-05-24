@@ -1,0 +1,13 @@
+# Ignore local configuration and secrets
+__pycache__/
+*.pyc
+.env
+.vscode/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Streamlit cache and temp files
+.streamlit/

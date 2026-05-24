@@ -1,0 +1,8 @@
+pyautogen==0.2.38
+semantic-kernel
+streamlit
+azure-ai-projects
+azure-maps-route
+azure-identity
+python-dotenv
+openai
