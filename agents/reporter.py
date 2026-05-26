@@ -1,79 +1,102 @@
-"""Reporter Agent for CrisisSwarm.
-
-Creates situation reports that combine triage, allocation, and routing
-information. Reports include a human-readable summary and a detailed
-JSON payload suitable for storage or downstream consumption.
-"""
-from typing import Dict, Any
+"""Reporter Agent — full multi-agent situation report via Groq."""
+from typing import Dict, Any, Optional
 import json
 import datetime
 import traceback
 
+from core.context import SwarmContext
+from core import groq_client
+from core.agent_llm import agent_json_step
+
 AGENT_NAME = "Reporter"
 
 SYSTEM_MESSAGE = (
-    "Reporter Agent (Situation Reporter): Produce concise situation reports every 15 minutes. "
-    "Include total estimated casualties, per-zone breakdowns, resource allocations, ETA estimates, "
-    "and recommended next actions. Output both a `text_summary` and a `payload` JSON."
+    "Reporter Agent: Synthesize all agent outputs into an incident command situation report."
 )
 
+REPORTER_SYSTEM = """You are the situation reporter for incident command. Return JSON:
+{
+  "text_summary": "4-6 sentence executive summary covering disaster type, casualties, "
+                  "deployments, routes/ETAs, comms status, and top 3 next actions",
+  "recommendation": "single priority directive",
+  "highlights": ["bullet strings for key facts"]
+}"""
 
-def generate_report(plan: Dict[str, Any], allocations: Dict[str, Any], routes: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate a situation report combining plan, allocations, and routes.
 
-    Args:
-        plan: Commander plan dict
-        allocations: Resource agent output
-        routes: Routing agent output
+def _offline_summary(plan: Dict[str, Any], allocations: Dict[str, Any], routes: Dict[str, Any]) -> Dict[str, Any]:
+    total = sum(
+        z.get("estimated_total", 0)
+        for z in plan.get("triage", {}).get("zones", {}).values()
+    )
+    return {
+        "text_summary": f"Total estimated casualties: {total}. See allocations and routes in payload.",
+        "recommendation": "Prioritize Critical casualties; deploy to shortest ETA zones first.",
+        "highlights": [],
+    }
 
-    Returns:
-        dict with `agent`, `system_message`, `text_summary`, and `payload`.
-    """
-    print("[Reporter] Generating situation report")
+
+def generate_report(
+    plan: Dict[str, Any],
+    allocations: Dict[str, Any],
+    routes: Dict[str, Any],
+    context: Optional[SwarmContext] = None,
+    comms: Optional[Dict[str, Any]] = None,
+    analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    print("[Reporter] Synthesizing full swarm outputs")
     try:
-        ts = datetime.datetime.utcnow().isoformat() + "Z"
-
-        total_est = 0
+        ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         zones = plan.get("triage", {}).get("zones", {})
-        for z, info in zones.items():
-            total_est += info.get("estimated_total", 0)
+        total_est = sum(z.get("estimated_total", 0) for z in zones.values())
 
-        zone_lines = []
-        for z, info in zones.items():
-            br = info.get("breakdown", {})
-            zone_lines.append(f"{z}: {info.get('estimated_total')} (C:{br.get('Critical')} S:{br.get('Serious')})")
-
-        text_summary = (
-            f"Situation Report ({ts}): Total estimated casualties: {total_est}. " + " | ".join(zone_lines)
-        )
+        def fallback():
+            return _offline_summary(plan, allocations, routes)
 
         payload = {
+            "plan": plan,
+            "allocations": allocations,
+            "routes": routes,
+            "comms": comms,
+            "analysis": analysis,
+        }
+        user = json.dumps(payload, indent=2)
+        if context:
+            user = context.prompt_block(user)
+
+        llm_out = agent_json_step(AGENT_NAME, REPORTER_SYSTEM, user, fallback)
+        text_summary = llm_out.get("text_summary", fallback()["text_summary"])
+        if not text_summary.startswith("Situation"):
+            text_summary = f"Situation Report ({ts}): {text_summary}"
+
+        payload_out = {
             "timestamp": ts,
             "total_estimated": total_est,
             "zones": zones,
-            "allocations": allocations.get("allocations") if isinstance(allocations, dict) else allocations,
-            "routes": routes.get("routes") if isinstance(routes, dict) else routes,
-            "recommendation": "Prioritize Critical casualties; pre-position ambulances to shortest ETA zones.",
+            "allocations": allocations.get("allocations"),
+            "routes": routes.get("routes"),
+            "comms_summary": comms.get("narrative") if comms else "",
+            "recommendation": llm_out.get("recommendation", ""),
+            "highlights": llm_out.get("highlights", []),
+            "analysis": analysis,
         }
 
-        output = {"agent": AGENT_NAME, "system_message": SYSTEM_MESSAGE, "text_summary": text_summary, "payload": payload}
-        print(f"[Reporter] Generated report for {AGENT_NAME}:", json.dumps(output, indent=2))
+        output = {
+            "agent": AGENT_NAME,
+            "system_message": SYSTEM_MESSAGE,
+            "text_summary": text_summary,
+            "payload": payload_out,
+            "llm_used": llm_out.get("llm_used", False),
+        }
+        print(f"[Reporter] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:
-        print(f"[Reporter] Error generating report: {e}\n{traceback.format_exc()}")
+        print(f"[Reporter] Error: {e}\n{traceback.format_exc()}")
         return {"agent": AGENT_NAME, "error": str(e)}
 
 
 def agent_entry(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point for orchestrators; expects `message` with plan/allocations/routes."""
-    plan = message.get("plan", {})
-    allocations = message.get("allocations", {})
-    routes = message.get("routes", {})
-    return generate_report(plan, allocations, routes)
-
-
-if __name__ == "__main__":
-    sample_plan = {"triage": {"zones": {"Dharavi": {"estimated_total": 200, "breakdown": {"Critical": 20, "Serious": 60}}}}}
-    sample_alloc = {"allocations": [{"zone": "Dharavi", "ambulances": 10}]}
-    sample_routes = {"routes": [{"zone": "Dharavi", "eta_minutes": 15}]}
-    generate_report(sample_plan, sample_alloc, sample_routes)
+    return generate_report(
+        message.get("plan", {}),
+        message.get("allocations", {}),
+        message.get("routes", {}),
+    )

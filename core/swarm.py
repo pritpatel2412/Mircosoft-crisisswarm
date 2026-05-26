@@ -1,197 +1,205 @@
-"""Swarm orchestration utilities with AutoGen GroupChat integration.
-
-This module attempts to initialize a GroupChat using `pyautogen` (if
-available) and an Azure OpenAI backend configured via `config.settings`.
-If AutoGen or Azure credentials are not present, it falls back to a safe
-in-process `SwarmManager` that calls agent functions sequentially.
-
-The `run_swarm` function is the main entry point and accepts a disaster
-message string. It prints agent activity for demo visibility and returns
-the combined outputs from all agents.
-"""
+"""Swarm orchestration — shared situation context and Groq-powered agents."""
 from typing import Dict, Any, List
 import importlib
 import traceback
 import json
 
-from config import settings
-
-# Import agent modules (they expose SYSTEM_MESSAGE and agent entry functions)
-AGENT_MODULES = [
-    "agents.commander",
-    "agents.triage",
-    "agents.resource",
-    "agents.routing",
-    "agents.comms",
-    "agents.reporter",
-]
+from core import groq_client
+from core.context import SwarmContext
+from core.situation import parse_situation
+from core.analysis import build_analysis_payload
 
 
-def _attempt_autogen_groupchat(disaster_message: str) -> Dict[str, Any]:
-    """Attempt to run a GroupChat via pyautogen/AutoGen.
+def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Build conversation log from agent narratives and structured outputs."""
+    transcript: List[Dict[str, str]] = []
 
-    This function performs a best-effort integration: if `pyautogen` is
-    installed and Azure OpenAI keys are present it will attempt to build
-    a GroupChat. If anything fails, it raises an exception to signal the
-    caller to fall back to the in-process manager.
-    """
-    # Detailed AutoGen (pyautogen) integration.
-    # Steps to enable AutoGen with Azure OpenAI:
-    # 1. Install pyautogen (already listed in requirements):
-    #      pip install pyautogen
-    # 2. Set environment variables or .env with your Azure OpenAI settings:
-    #      AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com
-    #      AZURE_OPENAI_KEY=<your-key>
-    #      AZURE_OPENAI_DEPLOYMENT=<deployment-name>
-    # 3. Optionally set AZURE_MAPS_KEY for routing features.
-    # 4. Run the dashboard or call run_swarm(); the code will attempt to use pyautogen.
+    situation = ctx.situation
+    if situation.get("summary"):
+        transcript.append({
+            "agent": "Situation",
+            "message": situation["summary"],
+        })
 
-    try:
-        import pyautogen as autogen  # type: ignore
-    except Exception as e:
-        raise RuntimeError("pyautogen not available: install pyautogen to enable GroupChat") from e
+    plan = outputs.get("plan", {})
+    if plan.get("narrative"):
+        transcript.append({"agent": "Commander", "message": plan["narrative"]})
 
-    # Build participant configs from agent modules
-    participants = []
-    for mod_path in AGENT_MODULES:
-        mod = importlib.import_module(mod_path)
-        system_msg = getattr(mod, "SYSTEM_MESSAGE", "")
-        name = getattr(mod, "AGENT_NAME", mod_path.split('.')[-1])
-        participants.append({"name": name, "system_message": system_msg})
-
-    # Validate Groq credentials
-    if not settings.GROQ_API_KEY:
-        raise RuntimeError(
-            "Groq API key not set. Set GROQ_API_KEY in environment or .env"
+    triage = plan.get("triage", {})
+    if triage.get("narrative"):
+        transcript.append({"agent": "Triage", "message": triage["narrative"]})
+    for zone, info in triage.get("zones", {}).items():
+        br = info.get("breakdown", {})
+        note = info.get("notes", "")
+        msg = (
+            f"{zone}: {info.get('estimated_total')} casualties "
+            f"(C:{br.get('Critical')} S:{br.get('Serious')} M:{br.get('Minor')})"
         )
+        if note:
+            msg += f" — {note}"
+        transcript.append({"agent": "Triage", "message": msg})
 
-    try:
-        print("[Swarm] Initializing pyautogen GroupChat with Groq API")
+    allocations = outputs.get("allocations", {})
+    if allocations.get("narrative"):
+        transcript.append({"agent": "Resource", "message": allocations["narrative"]})
+    for a in allocations.get("allocations", []):
+        transcript.append({
+            "agent": "Resource",
+            "message": a.get("rationale") or (
+                f"{a.get('zone')}: {a.get('ambulances')} ambulances, "
+                f"{a.get('medical_teams')} medical teams."
+            ),
+        })
 
-        llm_config = {
-            "config_list": [
-                {
-                    "model": settings.GROQ_MODEL,
-                    "api_key": settings.GROQ_API_KEY,
-                    "base_url": "https://api.groq.com/openai/v1",
-                }
-            ]
-        }
+    routes = outputs.get("routes", {})
+    if routes.get("narrative"):
+        transcript.append({"agent": "Routing", "message": routes["narrative"]})
+    order = routes.get("route_order") or []
+    if order:
+        transcript.append({
+            "agent": "Routing",
+            "message": f"Deployment order: {' → '.join(order)}",
+        })
+    for r in routes.get("routes", []):
+        transcript.append({
+            "agent": "Routing",
+            "message": (
+                f"{r.get('zone')}: {r.get('distance_km', '?')} km, "
+                f"ETA {r.get('eta_minutes')} min, status {r.get('status')} — {r.get('rationale', '')}"
+            ),
+        })
 
-        agents = []
-        for p in participants:
-            agent = autogen.AssistantAgent(
-                name=p["name"],
-                system_message=p["system_message"],
-                llm_config=llm_config
-            )
-            agents.append(agent)
+    comms = outputs.get("comms", {})
+    if comms.get("narrative"):
+        transcript.append({"agent": "Comms", "message": comms["narrative"]})
+    for d in comms.get("delivery_log", []):
+        prefix = d.get("recipient_type", "unknown").upper()
+        transcript.append({
+            "agent": "Comms",
+            "message": f"[{prefix}] {d.get('message', '')}",
+        })
 
-        user_proxy = autogen.UserProxyAgent(
-            name="user_proxy",
-            human_input_mode="NEVER",
-            max_consecutive_auto_reply=10,
-            is_termination_msg=lambda x: x.get("content", "") and x.get("content", "").rstrip().endswith("TERMINATE"),
-            code_execution_config=False,
-        )
+    report = outputs.get("report", {})
+    if report.get("text_summary"):
+        transcript.append({"agent": "Reporter", "message": report["text_summary"]})
 
-        groupchat = autogen.GroupChat(agents=[user_proxy] + agents, messages=[], max_round=12)
-        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=llm_config)
+    analysis = outputs.get("analysis", {})
+    if analysis.get("scenario_assessment"):
+        transcript.append({"agent": "Analysis", "message": analysis["scenario_assessment"]})
+    for action in analysis.get("recommended_actions", [])[:6]:
+        transcript.append({"agent": "Analysis", "message": f"→ {action}"})
 
-        user_proxy.initiate_chat(
-            manager,
-            message=disaster_message
-        )
+    if not transcript and ctx.agent_log:
+        transcript = list(ctx.agent_log)
 
-        transcript: List[Dict[str, str]] = []
-        for msg in groupchat.messages:
-            transcript.append({
-                "agent": msg.get("name", "unknown"),
-                "message": msg.get("content", "")
-            })
-
-        print("[Swarm] pyautogen GroupChat finished; returning transcript")
-        return {"agent": "autogen_groupchat", "transcript": transcript}
-    except Exception as e:
-        # Bubble up a helpful message so caller falls back
-        raise RuntimeError("AutoGen GroupChat run failed: " + str(e)) from e
+    return transcript
 
 
 class SwarmManager:
-    """Fallback in-process orchestrator that calls agent functions sequentially.
-
-    This manager mirrors the behavior of the AutoGen GroupChat but runs
-    locally without external dependencies so demos work offline.
-    """
+    """Runs all agents in sequence with shared SwarmContext."""
 
     def run_full_scenario(self, scenario_text: str) -> Dict[str, Any]:
-        """Run agents sequentially and aggregate their outputs.
-
-        Args:
-            scenario_text: disaster alert text
-
-        Returns:
-            Aggregated dict of agent outputs.
-        """
         try:
+            print("[Swarm] Parsing disaster situation...")
+            situation = parse_situation(scenario_text)
+            ctx = SwarmContext(scenario_text=scenario_text, situation=situation)
+
             commander_mod = importlib.import_module("agents.commander")
             resource_mod = importlib.import_module("agents.resource")
             routing_mod = importlib.import_module("agents.routing")
             comms_mod = importlib.import_module("agents.comms")
             reporter_mod = importlib.import_module("agents.reporter")
-            triage_mod = importlib.import_module("agents.triage")
 
-            # Commander drives triage and builds initial plan
-            print("[SwarmManager] Calling Commander...")
+            print("[Swarm] Commander + Triage...")
             commander = getattr(commander_mod, "Commander")()
-            plan = commander.run_triage_then_plan(scenario_text)
+            plan = commander.run_triage_then_plan(scenario_text, context=ctx)
 
-            print("[SwarmManager] Calling Resource Agent...")
-            allocations = resource_mod.allocate_resources(plan)
+            print("[Swarm] Resource...")
+            allocations = resource_mod.allocate_resources(plan, context=ctx)
 
-            print("[SwarmManager] Calling Routing Agent...")
-            routes = routing_mod.plan_routes(plan.get("task_assignments", []))
+            print("[Swarm] Routing...")
+            routes = routing_mod.plan_routes(
+                plan.get("task_assignments", []),
+                context=ctx,
+                allocations=allocations,
+            )
 
-            print("[SwarmManager] Calling Comms Agent...")
-            alerts = []
-            for alloc in allocations.get("allocations", []):
-                zone = alloc.get("zone")
-                alerts.append({
-                    "recipient_type": "responder",
-                    "contact": None,
-                    "message": f"Deploy {alloc.get('ambulances')} ambulances and {alloc.get('medical_teams')} medical teams to {zone}.",
-                })
-            comms = comms_mod.send_alerts(alerts)
+            print("[Swarm] Comms...")
+            comms = comms_mod.send_alerts(
+                context=ctx,
+                plan=plan,
+                allocations=allocations,
+                routes=routes,
+            )
 
-            print("[SwarmManager] Calling Reporter Agent...")
-            report = reporter_mod.generate_report(plan, allocations, routes)
+            print("[Swarm] Final operational analysis...")
+            analysis = build_analysis_payload(
+                scenario_text, plan, allocations, routes, context=ctx
+            )
 
-            return {"plan": plan, "allocations": allocations, "routes": routes, "comms": comms, "report": report}
+            print("[Swarm] Reporter...")
+            report = reporter_mod.generate_report(
+                plan,
+                allocations,
+                routes,
+                context=ctx,
+                comms=comms,
+                analysis=analysis,
+            )
+
+            outputs = {
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "comms": comms,
+                "report": report,
+                "analysis": analysis,
+            }
+            transcript = build_transcript(ctx, outputs)
+
+            llm_agents = sum(
+                1
+                for o in (plan, allocations, routes, comms, report, analysis)
+                if isinstance(o, dict) and o.get("llm_used")
+            )
+            if situation.get("source") == "groq":
+                llm_agents += 1
+
+            groq_ok, groq_msg = groq_client.verify_connection()
+            mode = "groq_multi_agent" if groq_ok else "offline_pipeline"
+
+            return {
+                "mode": mode,
+                "groq_live": groq_ok,
+                "groq_status": groq_msg,
+                "groq_model": groq_client.resolve_model() if groq_client.is_configured() else None,
+                "situation": situation,
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "comms": comms,
+                "report": report,
+                "analysis": analysis,
+                "transcript": transcript,
+                "agents_with_llm": llm_agents,
+            }
         except Exception:
             return {"error": "SwarmManager failed", "trace": traceback.format_exc()}
 
 
 def run_swarm(disaster_message: str) -> Dict[str, Any]:
-    """Main entry point: try AutoGen GroupChat, else fallback to SwarmManager.
+    if groq_client.is_configured():
+        ok, msg = groq_client.verify_connection()
+        if ok:
+            print(f"[Swarm] Groq LIVE — {msg}")
+        else:
+            print(f"[Swarm] OFFLINE MODE (API failed): {msg}")
+    else:
+        print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
 
-    Args:
-        disaster_message: textual disaster alert
-
-    Returns:
-        Aggregated outputs or transcript depending on the execution path.
-    """
-    try:
-        # First attempt: AutoGen GroupChat
-        out = _attempt_autogen_groupchat(disaster_message)
-        return out
-    except Exception as e:
-        print(f"[Swarm] AutoGen unavailable or failed: {e}. Falling back to local SwarmManager.")
-        mgr = SwarmManager()
-        return mgr.run_full_scenario(disaster_message)
+    return SwarmManager().run_full_scenario(disaster_message)
 
 
 if __name__ == "__main__":
     from core.scenario import load_demo_scenario
-    demo = load_demo_scenario()
-    out = run_swarm(demo)
-    print(json.dumps(out, indent=2))
+    print(json.dumps(run_swarm(load_demo_scenario()), indent=2))

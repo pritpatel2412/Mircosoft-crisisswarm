@@ -1,96 +1,130 @@
-"""Triage Agent for CrisisSwarm.
-
-Extracts per-zone casualty estimates from free-form disaster text and
-applies a deterministic heuristic to classify victims into Critical,
-Serious, and Minor categories. This offline implementation ensures the
-demo works without Azure credentials; replace with an LLM pipeline later
-for improved accuracy.
-"""
-from typing import Dict, Any
+"""Triage Agent — casualty extraction and medical classification via Groq."""
+from typing import Dict, Any, Tuple, Optional
 import re
 import json
 import traceback
 
+from core import groq_client
+from core.context import SwarmContext
+from core.agent_llm import agent_json_step
+
 AGENT_NAME = "Triage"
 
 SYSTEM_MESSAGE = (
-    "Triage Agent (Medical Triage Specialist): Given a disaster scenario, "
-    "extract explicit zones and casualty counts, then produce a JSON with "
-    "per-zone `estimated_total` and a `breakdown` into Critical/Serious/Minor.\n"
-    "Output format: {agent, system_message, input_summary, zones: {zone: {estimated_total, breakdown}}}."
+    "Triage Agent (Medical Triage Specialist): Extract zones, classify casualties "
+    "into Critical/Serious/Minor based on disaster severity and zone hazards."
 )
 
+_ZONE_REGEX = re.compile(r"([A-Za-z\- ]+)\s*\((\d{1,5})\)")
 
-def _parse_zones(text: str) -> Dict[str, int]:
-    """Parse zone casualty estimates from free text.
+TRIAGE_SYSTEM = """You are a medical triage specialist. Using the scenario and situation brief,
+return JSON:
+{
+  "narrative": "1-2 sentences on triage approach",
+  "zones": {
+    "ZoneName": {
+      "estimated_total": <int>,
+      "breakdown": {"Critical": <int>, "Serious": <int>, "Minor": <int>},
+      "notes": "brief clinical/operational note"
+    }
+  }
+}
+Breakdown must sum to estimated_total. Prioritize higher Critical % in zones with blocked access or worse hazards."""
 
-    This looks for patterns like 'Dharavi (200)'. If none are found it
-    attempts a fallback search for an overall `Estimated N casualties`.
-    """
+
+def _parse_zones_regex(text: str) -> Dict[str, int]:
     zones: Dict[str, int] = {}
-    matches = re.findall(r"([A-Za-z\- ]+)\s*\((\d{1,5})\)", text)
-    for name, num in matches:
-        clean_name = name.strip()
-        if clean_name.lower().startswith("and "):
-            clean_name = clean_name[4:].strip()
-        zones[clean_name] = int(num)
-    if not zones:
-        m = re.search(r"Estimated\s+(\d{2,6})\s+casualties", text, re.IGNORECASE)
-        if m:
-            zones["unknown"] = int(m.group(1))
-    return zones
+    for name, num in _ZONE_REGEX.findall(text):
+        zones[name.strip()] = int(num)
+    return zones or {"unknown": 100}
 
 
 def _classify_counts(count: int) -> Dict[str, int]:
-    """Heuristic: split counts into Critical (10%), Serious (30%), Minor (rest)."""
     critical = max(1, int(count * 0.1))
     serious = int(count * 0.3)
     minor = count - critical - serious
     return {"Critical": critical, "Serious": serious, "Minor": minor}
 
 
-def triage_victims(scenario_text: str) -> Dict[str, Any]:
-    """Process scenario text and return structured triage results.
+def _offline_triage(scenario_text: str, situation: Dict[str, Any]) -> Dict[str, Any]:
+    zone_counts: Dict[str, int] = {}
+    for z in situation.get("zones", []):
+        if isinstance(z, dict) and z.get("name"):
+            zone_counts[z["name"]] = int(z.get("casualties", 0))
+    if not zone_counts:
+        zone_counts = _parse_zones_regex(scenario_text)
 
-    Args:
-        scenario_text: free-form disaster description
+    results = {}
+    for zone, count in zone_counts.items():
+        results[zone] = {
+            "estimated_total": count,
+            "breakdown": _classify_counts(count),
+            "notes": "",
+        }
+    return {
+        "narrative": "Heuristic triage applied (offline).",
+        "zones": results,
+    }
 
-    Returns:
-        dict with `agent`, `system_message`, `input_summary`, and `zones`.
-    """
-    print("[Triage] Processing scenario text for casualty extraction")
+
+def triage_victims(
+    scenario_text: str,
+    context: Optional[SwarmContext] = None,
+) -> Dict[str, Any]:
+    print("[Triage] Processing scenario with full situation context")
+    situation = context.situation if context else {}
     try:
-        zones = _parse_zones(scenario_text)
-        results: Dict[str, Any] = {}
-        for zone, count in zones.items():
-            split = _classify_counts(count)
-            results[zone] = {"estimated_total": count, "breakdown": split}
 
+        def fallback():
+            return _offline_triage(scenario_text, situation)
+
+        if context:
+            llm_out = agent_json_step(
+                AGENT_NAME,
+                TRIAGE_SYSTEM,
+                context.prompt_block(),
+                fallback,
+            )
+        elif groq_client.is_configured():
+            llm_out = agent_json_step(
+                AGENT_NAME,
+                TRIAGE_SYSTEM,
+                scenario_text,
+                fallback,
+            )
+        else:
+            llm_out = fallback()
+            llm_out["llm_used"] = False
+
+        zones_raw = llm_out.get("zones", {})
+        results: Dict[str, Any] = {}
+        for zone, info in zones_raw.items():
+            if not isinstance(info, dict):
+                continue
+            total = int(info.get("estimated_total", 0))
+            breakdown = info.get("breakdown") or _classify_counts(total)
+            results[zone] = {
+                "estimated_total": total,
+                "breakdown": breakdown,
+                "notes": info.get("notes", ""),
+            }
+
+        narrative = llm_out.get("narrative", "Triage complete.")
         output = {
             "agent": AGENT_NAME,
             "system_message": SYSTEM_MESSAGE,
             "input_summary": scenario_text[:200],
             "zones": results,
+            "narrative": narrative,
+            "llm_used": llm_out.get("llm_used", False),
         }
-        print(f"[Triage] Output for agent {AGENT_NAME}:", json.dumps(output, indent=2))
+        print(f"[Triage] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:
-        print(f"[Triage] Error during triage: {e}\n{traceback.format_exc()}")
+        print(f"[Triage] Error: {e}\n{traceback.format_exc()}")
         return {"agent": AGENT_NAME, "error": str(e)}
 
 
 def agent_entry(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point expected by orchestration layers.
-
-    Expects `message` to contain a `text` key with scenario content.
-    """
     text = message.get("text", "")
     return triage_victims(text)
-
-
-if __name__ == "__main__":
-    demo = (
-        "DISASTER ALERT: 6.8 magnitude earthquake struck Mumbai at 14:32 IST. "
-        "Estimated 450 casualties across 3 zones: Dharavi (200), Kurla (150), Andheri (100)."
-    )
-    triage_victims(demo)

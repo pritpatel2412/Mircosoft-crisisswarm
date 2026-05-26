@@ -4,6 +4,8 @@ from agents.resource import allocate_resources
 from agents.routing import plan_routes
 from agents.comms import send_alerts
 from agents.reporter import generate_report
+from core.context import SwarmContext
+from core.situation import parse_situation
 import json
 
 SCENARIO = (
@@ -13,29 +15,36 @@ SCENARIO = (
 
 
 def main():
-    print('\n=== CrisisSwarm Full Demo ===')
+    print("\n=== CrisisSwarm Full Demo ===")
+    situation = parse_situation(SCENARIO)
+    ctx = SwarmContext(scenario_text=SCENARIO, situation=situation)
+
     commander = Commander()
-    plan = commander.run_triage_then_plan(SCENARIO)
+    plan = commander.run_triage_then_plan(SCENARIO, context=ctx)
+    allocations = allocate_resources(plan, context=ctx)
+    routes = plan_routes(
+        plan.get("task_assignments", []),
+        context=ctx,
+        allocations=allocations,
+    )
+    comms_out = send_alerts(context=ctx, plan=plan, allocations=allocations, routes=routes)
+    report = generate_report(plan, allocations, routes, context=ctx, comms=comms_out)
 
-    allocations = allocate_resources(plan)
-    routes = plan_routes(plan.get('task_assignments', []))
-
-    # Prepare simple alert items for comms
-    alerts = []
-    for alloc in allocations.get('allocations', []):
-        zone = alloc.get('zone')
-        alerts.append({
-            'recipient_type': 'responder',
-            'contact': None,
-            'message': f"Deploy {alloc.get('ambulances')} ambulances and {alloc.get('medical_teams')} medical teams to {zone}.",
-        })
-
-    comms_out = send_alerts(alerts)
-    report = generate_report(plan, allocations, routes)
-
-    print('\n=== Demo Summary ===')
-    print(json.dumps({'plan': plan, 'allocations': allocations, 'routes': routes, 'comms': comms_out, 'report': report}, indent=2))
+    print("\n=== Demo Summary ===")
+    print(
+        json.dumps(
+            {
+                "situation": situation,
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "comms": comms_out,
+                "report": report,
+            },
+            indent=2,
+        )
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

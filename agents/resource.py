@@ -1,87 +1,97 @@
-"""Resource Agent for CrisisSwarm.
-
-Allocates ambulances, medical teams, shelters, and supplies based on the
-`task_assignments` provided by the Commander. The implementation uses a
-deterministic heuristic so the demo runs offline; it exposes `agent_entry`
-for orchestration layers and returns structured JSON suitable for a UI.
-"""
-from typing import Dict, Any, List
+"""Resource Agent — allocates ambulances, teams, shelters via Groq + validation."""
+from typing import Dict, Any, List, Optional
 import json
 import traceback
+
+from core.context import SwarmContext
+from core.agent_llm import agent_json_step
 
 AGENT_NAME = "Resource"
 
 SYSTEM_MESSAGE = (
-    "Resource Agent (Allocator): Given Commander `task_assignments`, allocate "
-    "ambulances, medical teams, shelters, and basic supplies. For each zone, "
-    "provide counts, an ETA estimate placeholder, and a short rationale.\n"
-    "Output format: {agent, system_message, allocations: [...] }"
+    "Resource Agent: Allocate ambulances, medical teams, shelters, and supplies "
+    "per zone based on commander tasks and situation constraints."
 )
 
+RESOURCE_SYSTEM = """You are a disaster resource allocator. Return JSON:
+{
+  "narrative": "1-2 sentences explaining allocation strategy",
+  "allocations": [
+    {
+      "zone": "name",
+      "estimated_total": <int>,
+      "ambulances": <int>,
+      "medical_teams": <int>,
+      "shelters": <int>,
+      "water_kits": <int>,
+      "rationale": "why these numbers"
+    }
+  ]
+}
+Scale resources to casualties and task urgency. Minimum 1 ambulance per zone with casualties."""
 
-def allocate_resources(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute resource allocations from a Commander plan.
 
-    Args:
-        plan: dict containing `task_assignments` produced by the Commander.
+def _heuristic_allocations(plan: Dict[str, Any]) -> Dict[str, Any]:
+    allocations: List[Dict[str, Any]] = []
+    for a in plan.get("task_assignments", []):
+        zone = a.get("zone")
+        est = a.get("est_total", 0)
+        ambulances, medical_teams, shelters = 0, 0, 0
+        for t in a.get("tasks", []):
+            units = t.get("units", 1)
+            ttype = t.get("type")
+            if ttype == "evacuate":
+                ambulances += max(1, int(units / 2))
+            if ttype == "medical_teams":
+                medical_teams += max(1, units)
+            if ttype == "shelter":
+                shelters += max(1, units)
+        allocations.append({
+            "zone": zone,
+            "estimated_total": est,
+            "ambulances": max(1, ambulances),
+            "medical_teams": max(1, medical_teams),
+            "shelters": max(1, shelters),
+            "water_kits": max(10, int(est / 10)),
+            "rationale": f"Heuristic allocation for {est} casualties in {zone}.",
+        })
+    return {"narrative": "Heuristic resource allocation.", "allocations": allocations}
 
-    Returns:
-        dict with `agent`, `system_message`, and `allocations` list.
-    """
-    print("[Resource] Computing allocations based on Commander plan")
+
+def allocate_resources(
+    plan: Dict[str, Any],
+    context: Optional[SwarmContext] = None,
+) -> Dict[str, Any]:
+    print("[Resource] Allocating with commander plan and situation context")
     try:
-        assignments = plan.get("task_assignments", [])
-        allocations: List[Dict[str, Any]] = []
 
-        for a in assignments:
-            zone = a.get("zone")
-            est = a.get("est_total", 0)
-            tasks = a.get("tasks", [])
+        def fallback():
+            return _heuristic_allocations(plan)
 
-            ambulances = 0
-            medical_teams = 0
-            shelters = 0
+        user = json.dumps({"commander_plan": plan}, indent=2)
+        if context:
+            user = context.prompt_block(user)
 
-            for t in tasks:
-                ttype = t.get("type")
-                units = t.get("units", 1)
-                if ttype == "evacuate":
-                    ambulances += max(1, int(units / 2))
-                if ttype == "medical_teams":
-                    medical_teams += max(1, units)
-                if ttype == "shelter":
-                    shelters += max(1, units)
+        llm_out = agent_json_step(AGENT_NAME, RESOURCE_SYSTEM, user, fallback)
+        allocations = llm_out.get("allocations", fallback()["allocations"])
 
-            water_kits = max(10, int(est / 10))
+        for alloc in allocations:
+            alloc["ambulances"] = max(1, int(alloc.get("ambulances", 1)))
+            alloc["medical_teams"] = max(1, int(alloc.get("medical_teams", 1)))
 
-            zone_alloc = {
-                "zone": zone,
-                "estimated_total": est,
-                "ambulances": ambulances,
-                "medical_teams": medical_teams,
-                "shelters": shelters,
-                "water_kits": water_kits,
-                "rationale": (
-                    f"Allocating {ambulances} ambulances and {medical_teams} medical teams "
-                    f"for estimated {est} casualties in {zone}."
-                ),
-            }
-            allocations.append(zone_alloc)
-
-        output = {"agent": AGENT_NAME, "system_message": SYSTEM_MESSAGE, "allocations": allocations}
-        print(f"[Resource] Allocations for {AGENT_NAME}:", json.dumps(output, indent=2))
+        output = {
+            "agent": AGENT_NAME,
+            "system_message": SYSTEM_MESSAGE,
+            "narrative": llm_out.get("narrative", "Resources allocated."),
+            "allocations": allocations,
+            "llm_used": llm_out.get("llm_used", False),
+        }
+        print(f"[Resource] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:
-        print(f"[Resource] Error computing allocations: {e}\n{traceback.format_exc()}")
+        print(f"[Resource] Error: {e}\n{traceback.format_exc()}")
         return {"agent": AGENT_NAME, "error": str(e)}
 
 
 def agent_entry(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point for orchestrators; expects `message` with `plan` key."""
-    plan = message.get("plan", {})
-    return allocate_resources(plan)
-
-
-if __name__ == "__main__":
-    sample_plan = {"task_assignments": [{"zone": "Dharavi", "est_total": 200, "tasks": []}]}
-    allocate_resources(sample_plan)
+    return allocate_resources(message.get("plan", {}))

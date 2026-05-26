@@ -14,7 +14,7 @@ from typing import Optional
 try:
 	# optional convenience for local development
 	from dotenv import load_dotenv
-	load_dotenv()
+	load_dotenv(override=True)
 except Exception:
 	pass
 
@@ -26,7 +26,7 @@ class Settings:
 	All credentials must be supplied by the environment in production.
 	"""
 	GROQ_API_KEY: Optional[str] = None
-	GROQ_MODEL: Optional[str] = "llama3-70b-8192"
+	GROQ_MODEL: Optional[str] = "llama-3.3-70b-versatile"
 	AZURE_MAPS_KEY: Optional[str] = None
 	STREAMLIT_PORT: Optional[int] = 8501
 	SERVICE_NAME: Optional[str] = "CrisisSwarm"
@@ -44,9 +44,14 @@ def load_settings() -> Settings:
 			return default
 		return val
 
+	def _strip_key(val: Optional[str]) -> Optional[str]:
+		if val is None:
+			return None
+		return val.strip() or None
+
 	s = Settings(
-		GROQ_API_KEY=getenv("GROQ_API_KEY"),
-		GROQ_MODEL=getenv("GROQ_MODEL") or "llama3-70b-8192",
+		GROQ_API_KEY=_strip_key(getenv("GROQ_API_KEY")),
+		GROQ_MODEL=getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
 		AZURE_MAPS_KEY=getenv("AZURE_MAPS_KEY"),
 		STREAMLIT_PORT=int(getenv("STREAMLIT_PORT", 8501)),
 		SERVICE_NAME=getenv("SERVICE_NAME", "CrisisSwarm"),

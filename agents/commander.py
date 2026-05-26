@@ -1,81 +1,96 @@
-"""Commander agent for CrisisSwarm.
-
-This module exposes a `Commander` class and `agent_entry` function that
-can be used by AutoGen GroupChat or called locally. The commander acts as
-the master orchestrator: it requests triage, builds task assignments,
-and returns a structured JSON plan.
-
-All credentials come from `config.settings` and no secrets are hardcoded.
-"""
-from typing import Dict, Any
+"""Commander agent — orchestrates triage and operational task planning."""
+from typing import Dict, Any, Optional
 import json
 import traceback
 import importlib
 
 from config import settings
+from core.context import SwarmContext
+from core.agent_llm import agent_json_step
 
 AGENT_NAME = "Commander"
 
 SYSTEM_MESSAGE = (
-    "Commander Agent (Master Orchestrator): You receive a disaster alert and "
-    "must coordinate the swarm. Responsibilities:\n"
-    "1) Call the Triage Agent to extract zones and casualty estimates.\n"
-    "2) Translate triage output into explicit task assignments (evacuate, medical_teams, shelter).\n"
-    "3) Prioritize life-saving tasks and minimize ambulance ETA.\n"
-    "4) Return a clear JSON `task_assignments` structure consumable by Resource and Routing agents.\n"
-    "Always format your output as JSON with keys: agent, system_message, triage, task_assignments."
+    "Commander Agent (Master Orchestrator): Coordinate triage, prioritize zones, "
+    "and produce task assignments for Resource and Routing agents."
 )
+
+PLAN_SYSTEM = """You are the incident commander. Given scenario, situation brief, and triage output,
+return JSON:
+{
+  "narrative": "2-3 sentences on command decisions",
+  "priority_order": ["zone names highest priority first"],
+  "task_assignments": [
+    {
+      "zone": "name",
+      "est_total": <int>,
+      "priority": "critical|high|medium",
+      "tasks": [
+        {"type": "evacuate|medical_teams|shelter|search_rescue", "priority": "critical|high|medium", "units": <int>}
+      ]
+    }
+  ]
+}
+Respect blocked routes — prioritize zones with limited access. Scale units to casualty counts."""
+
+
+def _offline_tasks(triage_out: Dict[str, Any]) -> Dict[str, Any]:
+    tasks = []
+    priority = []
+    for zone, info in triage_out.get("zones", {}).items():
+        est = info.get("estimated_total", 0)
+        breakdown = info.get("breakdown", {})
+        priority.append(zone)
+        tasks.append({
+            "zone": zone,
+            "est_total": est,
+            "priority": "critical" if breakdown.get("Critical", 0) > 15 else "high",
+            "tasks": [
+                {"type": "evacuate", "priority": "high", "units": max(1, breakdown.get("Critical", 0))},
+                {"type": "medical_teams", "priority": "critical", "units": max(1, breakdown.get("Critical", 0))},
+                {"type": "shelter", "priority": "medium", "units": max(1, int(est / 50))},
+            ],
+        })
+    return {
+        "narrative": "Task plan built from triage heuristics.",
+        "priority_order": priority,
+        "task_assignments": tasks,
+    }
 
 
 class Commander:
-    """Commander agent wrapper used for local orchestration and testing.
-
-    Methods:
-        run_triage_then_plan(scenario_text): calls triage and builds assignments.
-    """
-
     def __init__(self):
-        """Initialize commander with settings dependency injection."""
         self.settings = settings
 
-    def run_triage_then_plan(self, scenario_text: str) -> Dict[str, Any]:
-        """Run the triage agent and return a JSON plan.
-
-        Args:
-            scenario_text: free-form disaster description
-
-        Returns:
-            Dict with `agent`, `system_message`, `triage`, and `task_assignments`.
-        """
-        print("[Commander] Received scenario — starting orchestration")
+    def run_triage_then_plan(
+        self,
+        scenario_text: str,
+        context: Optional[SwarmContext] = None,
+    ) -> Dict[str, Any]:
+        print("[Commander] Orchestrating triage and operational plan")
         try:
             triage_mod = importlib.import_module("agents.triage")
-            triage_out = triage_mod.triage_victims(scenario_text)
+            triage_out = triage_mod.triage_victims(scenario_text, context=context)
 
-            print("[Commander] Building task assignments from triage output")
-            tasks = []
-            for zone, info in triage_out.get("zones", {}).items():
-                est = info.get("estimated_total", 0)
-                breakdown = info.get("breakdown", {})
-                tasks.append(
-                    {
-                        "zone": zone,
-                        "est_total": est,
-                        "tasks": [
-                            {"type": "evacuate", "priority": "high", "units": max(1, breakdown.get("Critical", 0))},
-                            {"type": "medical_teams", "priority": "critical", "units": breakdown.get("Critical", 0)},
-                            {"type": "shelter", "priority": "medium", "units": max(1, int(est / 50))},
-                        ],
-                    }
-                )
+            def fallback():
+                return _offline_tasks(triage_out)
+
+            user = json.dumps({"triage": triage_out}, indent=2)
+            if context:
+                user = context.prompt_block(user)
+
+            llm_plan = agent_json_step(AGENT_NAME, PLAN_SYSTEM, user, fallback)
+            task_assignments = llm_plan.get("task_assignments", fallback()["task_assignments"])
 
             plan = {
                 "agent": AGENT_NAME,
                 "system_message": SYSTEM_MESSAGE,
+                "narrative": llm_plan.get("narrative", "Operational plan ready."),
+                "priority_order": llm_plan.get("priority_order", []),
                 "triage": triage_out,
-                "task_assignments": tasks,
+                "task_assignments": task_assignments,
+                "llm_used": llm_plan.get("llm_used", False),
             }
-
             print("[Commander] Plan ready:", json.dumps(plan, indent=2))
             return plan
         except Exception as e:
@@ -84,21 +99,4 @@ class Commander:
 
 
 def agent_entry(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Agent entry point expected by GroupChat orchestrators.
-
-    Args:
-        message: dict with `text` key containing scenario text.
-
-    Returns:
-        The same output as `run_triage_then_plan`.
-    """
-    text = message.get("text", "")
-    return Commander().run_triage_then_plan(text)
-
-
-if __name__ == "__main__":
-    demo = (
-        "DISASTER ALERT: 6.8 magnitude earthquake struck Mumbai at 14:32 IST. "
-        "Estimated 450 casualties across 3 zones: Dharavi (200), Kurla (150), Andheri (100)."
-    )
-    Commander().run_triage_then_plan(demo)
+    return Commander().run_triage_then_plan(message.get("text", ""))

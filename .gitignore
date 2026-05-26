@@ -1,13 +1,83 @@
-# Ignore local configuration and secrets
-__pycache__/
-*.pyc
+# --- Secrets (never commit) ---
 .env
-.vscode/
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets.json
 
-# Virtual environments
+# Keep the template
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# --- Virtual environments ---
 .venv/
 venv/
 env/
+ENV/
 
-# Streamlit cache and temp files
-.streamlit/
+# --- IDEs & editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+.streamlit/*.log
+
+# --- Logs & local outputs ---
+*.log
+logs/
+report.json
+*.tmp
+*.temp
+
+# --- Docker (local overrides) ---
+docker-compose.override.yml
+
+# --- Cursor / local tooling (optional) ---
+.cursor/
