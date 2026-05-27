@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import APIStatusError, OpenAI
 
@@ -25,6 +26,10 @@ DEPRECATED_MODEL_MAP = {
 
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
+_VERIFY_CACHE: Optional[Tuple[bool, str]] = None
+_VERIFY_CACHE_TS: float = 0.0
+_VERIFY_DEFAULT_TTL = 30.0
+
 
 def resolve_model(model: Optional[str] = None) -> str:
     """Return a supported Groq model id, migrating deprecated names."""
@@ -37,15 +42,27 @@ def is_configured() -> bool:
     return bool(key and key not in ("your_groq_api_key_here", "<placeholder>"))
 
 
-def verify_connection() -> tuple[bool, str]:
-    """Ping Groq once. Returns (ok, message). Failed auth does not count as usage on console."""
+def verify_connection(*, force: bool = False, ttl_seconds: float = _VERIFY_DEFAULT_TTL) -> tuple[bool, str]:
+    """Ping Groq once with a small cache. Returns (ok, message)."""
+    global _VERIFY_CACHE, _VERIFY_CACHE_TS
+    now = time.monotonic()
+    if not force and _VERIFY_CACHE and (now - _VERIFY_CACHE_TS) < ttl_seconds:
+        return _VERIFY_CACHE
+
     if not is_configured():
-        return False, "GROQ_API_KEY is not set in .env"
+        result = (False, "GROQ_API_KEY is not set in .env")
+        _VERIFY_CACHE = result
+        _VERIFY_CACHE_TS = now
+        return result
     try:
         reply = chat_text("Reply with exactly: OK", "ping", max_tokens=5)
-        return True, f"Connected (model {resolve_model()}). Test reply: {reply!r}"
+        result = (True, f"Connected (model {resolve_model()}). Test reply: {reply!r}")
     except Exception as exc:
-        return False, str(exc)
+        result = (False, str(exc))
+
+    _VERIFY_CACHE = result
+    _VERIFY_CACHE_TS = now
+    return result
 
 
 def get_client() -> OpenAI:

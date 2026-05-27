@@ -13,6 +13,7 @@ class SwarmContext:
     scenario_text: str
     situation: Dict[str, Any] = field(default_factory=dict)
     agent_log: List[Dict[str, str]] = field(default_factory=list)
+    verification: Optional[Dict[str, Any]] = None
 
     def add_log(self, agent: str, message: str) -> None:
         self.agent_log.append({"agent": agent, "message": message})

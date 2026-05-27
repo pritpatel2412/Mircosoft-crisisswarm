@@ -57,6 +57,7 @@ with col1:
     metrics_cols[0].metric("Active Agents", 0)
     metrics_cols[1].metric("Casualties Triaged", 0)
     metrics_cols[2].metric("Resources Deployed", 0)
+    live_render = st.checkbox("Live render transcript", value=True)
 
 AGENT_COLORS = {
     "Situation": "#636efa",
@@ -67,6 +68,7 @@ AGENT_COLORS = {
     "Comms": "#9467bd",
     "Reporter": "#8c564b",
     "Analysis": "#17becf",
+    "Verifier": "#e377c2",
 }
 
 
@@ -80,6 +82,27 @@ def render_message(msg: Dict[str, str]):
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
+
+
+def render_transcript(transcript: List[Dict[str, str]], live: bool) -> None:
+    if not transcript:
+        st.write("No transcript available.")
+        return
+    if not live:
+        for msg in transcript:
+            render_message(msg)
+        return
+
+    placeholder = st.empty()
+    rendered: List[Dict[str, str]] = []
+    batch_size = 4
+    delay_seconds = 0.06
+    for idx in range(0, len(transcript), batch_size):
+        rendered.extend(transcript[idx:idx + batch_size])
+        with placeholder.container():
+            for msg in rendered:
+                render_message(msg)
+        time.sleep(delay_seconds)
 
 
 log_container = st.container()
@@ -147,11 +170,55 @@ if st.button("ACTIVATE SWARM", key="start_swarm"):
         for action in analysis["recommended_actions"]:
             st.markdown(f"- {action}")
 
+    verification = out.get("verification", {})
+    st.subheader("Verification Layer")
+    v_status = verification.get("verification_status", "UNKNOWN")
+    if v_status == "PASSED":
+        st.success(
+            f"Verification **PASSED** — confidence "
+            f"{verification.get('confidence_score', 0):.2f}"
+        )
+    elif v_status == "FAILED":
+        st.error(
+            f"Verification **FAILED** — confidence "
+            f"{verification.get('confidence_score', 0):.2f}"
+        )
+    else:
+        st.warning(f"Verification status: {v_status}")
+
+    v_cols = st.columns(2)
+    v_cols[0].metric("Confidence Score", verification.get("confidence_score", 0))
+    approval = verification.get("requires_human_approval", False)
+    v_cols[1].metric(
+        "Human Approval",
+        "Required" if approval else "Not required",
+    )
+
+    issues = verification.get("issues_found", [])
+    if issues:
+        st.markdown("**Issues found**")
+        for issue in issues:
+            st.markdown(
+                f"- **[{issue.get('severity', '?')}] {issue.get('type', 'ISSUE')}**: "
+                f"{issue.get('message', '')}"
+            )
+            if issue.get("recommended_fix"):
+                st.caption(f"Fix: {issue['recommended_fix']}")
+
+    missing = verification.get("missing_data", [])
+    if missing:
+        st.markdown("**Missing data**")
+        for item in missing:
+            st.markdown(f"- {item}")
+
+    if verification.get("recommendations"):
+        st.markdown("**Verifier recommendations**")
+        for rec in verification["recommendations"]:
+            st.markdown(f"- {rec}")
+
     with log_container:
         st.subheader("Live Conversation Log")
-        for msg in transcript:
-            render_message(msg)
-            time.sleep(0.35)
+        render_transcript(transcript, live_render)
 
     st.header("Reporter Summary")
     report = out.get("report", {})
@@ -175,6 +242,8 @@ if st.button("ACTIVATE SWARM", key="start_swarm"):
         st.json(out.get("comms"))
         st.subheader("Analysis")
         st.json(analysis)
+        st.subheader("Verification")
+        st.json(verification)
 
 else:
     st.write("Click 'ACTIVATE SWARM' to run Groq-backed triage and operational analysis.")

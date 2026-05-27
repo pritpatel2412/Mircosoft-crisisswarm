@@ -79,6 +79,26 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
             "message": f"[{prefix}] {d.get('message', '')}",
         })
 
+    verification = outputs.get("verification", {})
+    if verification:
+        status = verification.get("verification_status", "UNKNOWN")
+        transcript.append({
+            "agent": "Verifier",
+            "message": (
+                f"Verification {status} — confidence "
+                f"{verification.get('confidence_score', 0):.2f}, "
+                f"{len(verification.get('issues_found', []))} issue(s)."
+            ),
+        })
+        for issue in verification.get("issues_found", []):
+            transcript.append({
+                "agent": "Verifier",
+                "message": (
+                    f"[{issue.get('severity')}] {issue.get('type')}: "
+                    f"{issue.get('message')}"
+                ),
+            })
+
     report = outputs.get("report", {})
     if report.get("text_summary"):
         transcript.append({"agent": "Reporter", "message": report["text_summary"]})
@@ -108,6 +128,7 @@ class SwarmManager:
             resource_mod = importlib.import_module("agents.resource")
             routing_mod = importlib.import_module("agents.routing")
             comms_mod = importlib.import_module("agents.comms")
+            verifier_mod = importlib.import_module("agents.verifier")
             reporter_mod = importlib.import_module("agents.reporter")
 
             print("[Swarm] Commander + Triage...")
@@ -132,9 +153,17 @@ class SwarmManager:
                 routes=routes,
             )
 
+            print("[Swarm] Verifier...")
+            verification = verifier_mod.verify_response_plan(
+                plan,
+                allocations,
+                routes,
+                context=ctx,
+            )
+
             print("[Swarm] Final operational analysis...")
             analysis = build_analysis_payload(
-                scenario_text, plan, allocations, routes, context=ctx
+                scenario_text, plan, allocations, routes, context=ctx, comms=comms
             )
 
             print("[Swarm] Reporter...")
@@ -145,6 +174,7 @@ class SwarmManager:
                 context=ctx,
                 comms=comms,
                 analysis=analysis,
+                verification=verification,
             )
 
             outputs = {
@@ -152,6 +182,7 @@ class SwarmManager:
                 "allocations": allocations,
                 "routes": routes,
                 "comms": comms,
+                "verification": verification,
                 "report": report,
                 "analysis": analysis,
             }
@@ -178,6 +209,7 @@ class SwarmManager:
                 "allocations": allocations,
                 "routes": routes,
                 "comms": comms,
+                "verification": verification,
                 "report": report,
                 "analysis": analysis,
                 "transcript": transcript,
@@ -189,11 +221,7 @@ class SwarmManager:
 
 def run_swarm(disaster_message: str) -> Dict[str, Any]:
     if groq_client.is_configured():
-        ok, msg = groq_client.verify_connection()
-        if ok:
-            print(f"[Swarm] Groq LIVE — {msg}")
-        else:
-            print(f"[Swarm] OFFLINE MODE (API failed): {msg}")
+        print("[Swarm] Groq key detected — will use live mode if API is reachable.")
     else:
         print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
 

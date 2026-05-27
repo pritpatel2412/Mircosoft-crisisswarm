@@ -23,13 +23,41 @@ REPORTER_SYSTEM = """You are the situation reporter for incident command. Return
 }"""
 
 
-def _offline_summary(plan: Dict[str, Any], allocations: Dict[str, Any], routes: Dict[str, Any]) -> Dict[str, Any]:
+def _verification_summary(verification: Optional[Dict[str, Any]]) -> str:
+    if not verification:
+        return ""
+    status = verification.get("verification_status", "UNKNOWN")
+    parts = [f"Verification: {status}."]
+    issues = verification.get("issues_found") or []
+    if issues:
+        parts.append(
+            f"Operational conflicts: {len(issues)} "
+            f"({', '.join(i.get('type', 'issue') for i in issues[:3])})."
+        )
+    if verification.get("requires_human_approval"):
+        parts.append("Human approval required before execution.")
+    recs = verification.get("recommendations") or []
+    if recs:
+        parts.append(f"Recommended fixes: {recs[0]}")
+    return " ".join(parts)
+
+
+def _offline_summary(
+    plan: Dict[str, Any],
+    allocations: Dict[str, Any],
+    routes: Dict[str, Any],
+    verification: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     total = sum(
         z.get("estimated_total", 0)
         for z in plan.get("triage", {}).get("zones", {}).values()
     )
+    verify_note = _verification_summary(verification)
+    summary = f"Total estimated casualties: {total}. See allocations and routes in payload."
+    if verify_note:
+        summary = f"{summary} {verify_note}"
     return {
-        "text_summary": f"Total estimated casualties: {total}. See allocations and routes in payload.",
+        "text_summary": summary,
         "recommendation": "Prioritize Critical casualties; deploy to shortest ETA zones first.",
         "highlights": [],
     }
@@ -42,6 +70,7 @@ def generate_report(
     context: Optional[SwarmContext] = None,
     comms: Optional[Dict[str, Any]] = None,
     analysis: Optional[Dict[str, Any]] = None,
+    verification: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     print("[Reporter] Synthesizing full swarm outputs")
     try:
@@ -49,8 +78,11 @@ def generate_report(
         zones = plan.get("triage", {}).get("zones", {})
         total_est = sum(z.get("estimated_total", 0) for z in zones.values())
 
+        if verification is None and context and context.verification:
+            verification = context.verification
+
         def fallback():
-            return _offline_summary(plan, allocations, routes)
+            return _offline_summary(plan, allocations, routes, verification)
 
         payload = {
             "plan": plan,
@@ -58,6 +90,7 @@ def generate_report(
             "routes": routes,
             "comms": comms,
             "analysis": analysis,
+            "verification": verification,
         }
         user = json.dumps(payload, indent=2)
         if context:
@@ -65,8 +98,22 @@ def generate_report(
 
         llm_out = agent_json_step(AGENT_NAME, REPORTER_SYSTEM, user, fallback)
         text_summary = llm_out.get("text_summary", fallback()["text_summary"])
+        verify_note = _verification_summary(verification)
+        if verify_note and verify_note not in text_summary:
+            text_summary = f"{text_summary} {verify_note}"
         if not text_summary.startswith("Situation"):
             text_summary = f"Situation Report ({ts}): {text_summary}"
+
+        highlights = list(llm_out.get("highlights", []))
+        if verification:
+            highlights.append(
+                f"Verification {verification.get('verification_status')} "
+                f"(confidence {verification.get('confidence_score')})"
+            )
+            for issue in verification.get("issues_found", [])[:3]:
+                highlights.append(
+                    f"{issue.get('type')}: {issue.get('message')}"
+                )
 
         payload_out = {
             "timestamp": ts,
@@ -76,8 +123,18 @@ def generate_report(
             "routes": routes.get("routes"),
             "comms_summary": comms.get("narrative") if comms else "",
             "recommendation": llm_out.get("recommendation", ""),
-            "highlights": llm_out.get("highlights", []),
+            "highlights": highlights,
             "analysis": analysis,
+            "verification": verification,
+            "verification_status": (
+                verification.get("verification_status") if verification else None
+            ),
+            "requires_human_approval": (
+                verification.get("requires_human_approval") if verification else False
+            ),
+            "operational_conflicts": (
+                verification.get("issues_found", []) if verification else []
+            ),
         }
 
         output = {
