@@ -85,7 +85,11 @@ def allocate_resources(
             "narrative": llm_out.get("narrative", "Resources allocated."),
             "allocations": allocations,
             "llm_used": llm_out.get("llm_used", False),
+            "model_used": llm_out.get("model_used", "offline"),
+            "latency_ms": llm_out.get("latency_ms", 0),
         }
+        if llm_out.get("llm_error"):
+            output["llm_error"] = llm_out["llm_error"]
         print(f"[Resource] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:

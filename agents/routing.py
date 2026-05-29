@@ -1,11 +1,23 @@
-"""Routing Agent — routes and ETAs with situation-aware Groq prioritization."""
+"""Routing Agent — Azure Maps or haversine with Groq prioritization."""
+from __future__ import annotations
+
 from typing import List, Dict, Any, Tuple, Optional
 import json
 import math
 import traceback
+import urllib.parse
+import urllib.request
 
+from config import settings
 from core.context import SwarmContext
 from core.agent_llm import agent_json_step
+from core.scenario import (
+    MUMBAI_ZONE_COORDS,
+    FLORIDA_ZONE_COORDS,
+    MUMBAI_ORIGIN,
+    FLORIDA_ORIGIN,
+    origin_for_scenario,
+)
 
 AGENT_NAME = "Routing"
 
@@ -30,15 +42,7 @@ allocations, and task assignments, return JSON:
 }
 Shorter ETA for higher-priority zones. Increase ETA if zone access is blocked or routes are obstructed."""
 
-_KNOWN_COORDS = {
-    "Dharavi": (19.0033, 72.8446),
-    "Kurla": (19.0666, 72.8562),
-    "Andheri": (19.1190, 72.8465),
-    "Downtown": (25.7617, -80.1918),
-    "South Beach": (25.7826, -80.1341),
-    "Little Havana": (25.7681, -80.2223),
-    "Coral Gables": (25.7215, -80.2684),
-}
+_KNOWN_COORDS = {**MUMBAI_ZONE_COORDS, **FLORIDA_ZONE_COORDS}
 
 
 def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
@@ -51,27 +55,76 @@ def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return 2 * R * math.asin(math.sqrt(h))
 
 
+def _azure_maps_route(
+    origin: Tuple[float, float],
+    dest: Tuple[float, float],
+    api_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Call Azure Maps Route Directions API. Returns distance_km and eta_minutes or None."""
+    query = f"{origin[0]},{origin[1]}:{dest[0]},{dest[1]}"
+    params = urllib.parse.urlencode({
+        "api-version": "1.0",
+        "subscription-key": api_key,
+        "query": query,
+    })
+    url = f"https://atlas.microsoft.com/route/directions/json?{params}"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        routes = data.get("routes") or []
+        if not routes:
+            return None
+        summary = routes[0].get("summary") or {}
+        length_m = summary.get("lengthInMeters", 0)
+        travel_s = summary.get("travelTimeInSeconds", 0)
+        return {
+            "distance_km": round(length_m / 1000.0, 2),
+            "eta_minutes": max(1, int(travel_s / 60)),
+        }
+    except Exception as exc:
+        print(f"[Routing] Azure Maps request failed: {exc}")
+        return None
+
+
 def _heuristic_routes(
     task_assignments: List[Dict[str, Any]],
-    origin: Tuple[float, float] = None,
+    origin: Tuple[float, float],
+    scenario_text: str = "",
 ) -> Dict[str, Any]:
-    if not origin:
-        origin = (19.0760, 72.8777)
+    api_key = (settings.AZURE_MAPS_KEY or "").strip()
+    use_azure = bool(api_key and api_key not in ("your_azure_maps_subscription_key_here", "<placeholder>"))
+    routing_engine = "haversine"
+
     routes = []
     for a in task_assignments:
         zone = a.get("zone")
         coords = _KNOWN_COORDS.get(zone)
         if coords:
-            distance_km = _haversine_km(origin, coords)
-            eta_min = max(5, int((distance_km / 30.0) * 60))
+            azure_result = None
+            if use_azure:
+                azure_result = _azure_maps_route(origin, coords, api_key)
+                if azure_result:
+                    routing_engine = "azure_maps"
+
+            if azure_result:
+                distance_km = azure_result["distance_km"]
+                eta_min = azure_result["eta_minutes"]
+                rationale = "Azure Maps Route API (live road network)."
+            else:
+                distance_km = round(_haversine_km(origin, coords), 2)
+                eta_min = max(5, int((distance_km / 30.0) * 60))
+                rationale = "Haversine fallback at 30 km/h average."
+
             route = {
                 "zone": zone,
                 "from": {"lat": origin[0], "lon": origin[1]},
                 "to": {"lat": coords[0], "lon": coords[1]},
-                "distance_km": round(distance_km, 2),
+                "distance_km": distance_km,
                 "eta_minutes": eta_min,
                 "status": "ok",
-                "rationale": "Haversine heuristic at 30 km/h average.",
+                "rationale": rationale,
+                "routing_engine": routing_engine if azure_result else "haversine",
             }
         else:
             route = {
@@ -82,12 +135,15 @@ def _heuristic_routes(
                 "eta_minutes": 20,
                 "status": "unknown_zone_fallback",
                 "rationale": "Unknown zone coordinates; generic ETA.",
+                "routing_engine": "haversine",
             }
         routes.append(route)
+
     return {
-        "narrative": "Routes computed with distance heuristic.",
+        "narrative": f"Routes computed via {routing_engine}.",
         "route_order": [r["zone"] for r in routes],
         "routes": routes,
+        "routing_engine": routing_engine,
     }
 
 
@@ -113,7 +169,13 @@ def plan_routes(
 ) -> Dict[str, Any]:
     print("[Routing] Planning routes with situation awareness")
     try:
-        base = _heuristic_routes(task_assignments, origin)
+        if not origin and context:
+            origin = origin_for_scenario(context.scenario_text)
+        if not origin:
+            origin = MUMBAI_ORIGIN
+
+        scenario_text = context.scenario_text if context else ""
+        base = _heuristic_routes(task_assignments, origin, scenario_text)
 
         def fallback():
             return base
@@ -134,8 +196,13 @@ def plan_routes(
             "narrative": merged.get("narrative", ""),
             "route_order": merged.get("route_order", []),
             "routes": merged.get("routes", []),
+            "routing_engine": merged.get("routing_engine", "haversine"),
             "llm_used": llm_out.get("llm_used", False),
+            "model_used": llm_out.get("model_used", "offline"),
+            "latency_ms": llm_out.get("latency_ms", 0),
         }
+        if llm_out.get("llm_error"):
+            output["llm_error"] = llm_out["llm_error"]
         print(f"[Routing] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:

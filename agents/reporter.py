@@ -42,6 +42,7 @@ def generate_report(
     context: Optional[SwarmContext] = None,
     comms: Optional[Dict[str, Any]] = None,
     analysis: Optional[Dict[str, Any]] = None,
+    verifier: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     print("[Reporter] Synthesizing full swarm outputs")
     try:
@@ -57,6 +58,7 @@ def generate_report(
             "allocations": allocations,
             "routes": routes,
             "comms": comms,
+            "verifier": verifier,
             "analysis": analysis,
         }
         user = json.dumps(payload, indent=2)
@@ -78,6 +80,7 @@ def generate_report(
             "recommendation": llm_out.get("recommendation", ""),
             "highlights": llm_out.get("highlights", []),
             "analysis": analysis,
+            "verifier": verifier,
         }
 
         output = {
@@ -86,7 +89,11 @@ def generate_report(
             "text_summary": text_summary,
             "payload": payload_out,
             "llm_used": llm_out.get("llm_used", False),
+            "model_used": llm_out.get("model_used", "offline"),
+            "latency_ms": llm_out.get("latency_ms", 0),
         }
+        if llm_out.get("llm_error"):
+            output["llm_error"] = llm_out["llm_error"]
         print(f"[Reporter] Output:", json.dumps(output, indent=2))
         return output
     except Exception as e:

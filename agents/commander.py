@@ -90,7 +90,11 @@ class Commander:
                 "triage": triage_out,
                 "task_assignments": task_assignments,
                 "llm_used": llm_plan.get("llm_used", False),
+                "model_used": llm_plan.get("model_used", "offline"),
+                "latency_ms": llm_plan.get("latency_ms", 0),
             }
+            if llm_plan.get("llm_error"):
+                plan["llm_error"] = llm_plan["llm_error"]
             print("[Commander] Plan ready:", json.dumps(plan, indent=2))
             return plan
         except Exception as e:

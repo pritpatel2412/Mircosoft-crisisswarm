@@ -1,13 +1,17 @@
 """Swarm orchestration — shared situation context and Groq-powered agents."""
+from __future__ import annotations
+
 from typing import Dict, Any, List
 import importlib
 import traceback
 import json
+import time
 
 from core import groq_client
 from core.context import SwarmContext
 from core.situation import parse_situation
 from core.analysis import build_analysis_payload
+from core.agent_llm import step_metadata
 
 
 def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -16,10 +20,7 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
 
     situation = ctx.situation
     if situation.get("summary"):
-        transcript.append({
-            "agent": "Situation",
-            "message": situation["summary"],
-        })
+        transcript.append({"agent": "Situation", "message": situation["summary"]})
 
     plan = outputs.get("plan", {})
     if plan.get("narrative"):
@@ -79,6 +80,19 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
             "message": f"[{prefix}] {d.get('message', '')}",
         })
 
+    verifier = outputs.get("verifier", {})
+    if verifier.get("narrative"):
+        transcript.append({"agent": "Verifier", "message": verifier["narrative"]})
+    status = "APPROVED" if verifier.get("approved") else "NOT APPROVED"
+    score = verifier.get("confidence_score", 0)
+    transcript.append({
+        "agent": "Verifier",
+        "message": f"{status} (confidence {score}%). "
+        + "; ".join(verifier.get("issues_found", [])[:3]),
+    })
+    for fix in verifier.get("corrections", [])[:3]:
+        transcript.append({"agent": "Verifier", "message": f"Correction: {fix}"})
+
     report = outputs.get("report", {})
     if report.get("text_summary"):
         transcript.append({"agent": "Reporter", "message": report["text_summary"]})
@@ -95,27 +109,49 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
     return transcript
 
 
+def _situation_step(situation: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+    groq_live = situation.get("source") == "groq"
+    return {
+        "agent": "Situation",
+        "llm_used": groq_live,
+        "model_used": groq_client.resolve_model() if groq_live else "offline",
+        "latency_ms": latency_ms,
+        "mode": "groq" if groq_live else "offline",
+        "llm_error": situation.get("parse_error"),
+    }
+
+
 class SwarmManager:
     """Runs all agents in sequence with shared SwarmContext."""
 
     def run_full_scenario(self, scenario_text: str) -> Dict[str, Any]:
+        agent_steps: List[Dict[str, Any]] = []
         try:
             print("[Swarm] Parsing disaster situation...")
+            t0 = time.perf_counter()
             situation = parse_situation(scenario_text)
+            agent_steps.append(_situation_step(situation, int((time.perf_counter() - t0) * 1000)))
+
             ctx = SwarmContext(scenario_text=scenario_text, situation=situation)
 
             commander_mod = importlib.import_module("agents.commander")
             resource_mod = importlib.import_module("agents.resource")
             routing_mod = importlib.import_module("agents.routing")
             comms_mod = importlib.import_module("agents.comms")
+            verifier_mod = importlib.import_module("agents.verifier")
             reporter_mod = importlib.import_module("agents.reporter")
 
             print("[Swarm] Commander + Triage...")
             commander = getattr(commander_mod, "Commander")()
             plan = commander.run_triage_then_plan(scenario_text, context=ctx)
+            agent_steps.append(step_metadata(plan, "Commander"))
+            triage = plan.get("triage", {})
+            if triage:
+                agent_steps.append(step_metadata(triage, "Triage"))
 
             print("[Swarm] Resource...")
             allocations = resource_mod.allocate_resources(plan, context=ctx)
+            agent_steps.append(step_metadata(allocations, "Resource"))
 
             print("[Swarm] Routing...")
             routes = routing_mod.plan_routes(
@@ -123,6 +159,7 @@ class SwarmManager:
                 context=ctx,
                 allocations=allocations,
             )
+            agent_steps.append(step_metadata(routes, "Routing"))
 
             print("[Swarm] Comms...")
             comms = comms_mod.send_alerts(
@@ -131,11 +168,17 @@ class SwarmManager:
                 allocations=allocations,
                 routes=routes,
             )
+            agent_steps.append(step_metadata(comms, "Comms"))
+
+            print("[Swarm] Verifier...")
+            verifier = verifier_mod.verify_outputs(ctx, plan, allocations, routes, comms)
+            agent_steps.append(step_metadata(verifier, "Verifier"))
 
             print("[Swarm] Final operational analysis...")
             analysis = build_analysis_payload(
-                scenario_text, plan, allocations, routes, context=ctx
+                scenario_text, plan, allocations, routes, context=ctx, comms=comms
             )
+            agent_steps.append(step_metadata(analysis, "Analysis"))
 
             print("[Swarm] Reporter...")
             report = reporter_mod.generate_report(
@@ -145,26 +188,22 @@ class SwarmManager:
                 context=ctx,
                 comms=comms,
                 analysis=analysis,
+                verifier=verifier,
             )
+            agent_steps.append(step_metadata(report, "Reporter"))
 
             outputs = {
                 "plan": plan,
                 "allocations": allocations,
                 "routes": routes,
                 "comms": comms,
-                "report": report,
+                "verifier": verifier,
                 "analysis": analysis,
+                "report": report,
             }
             transcript = build_transcript(ctx, outputs)
 
-            llm_agents = sum(
-                1
-                for o in (plan, allocations, routes, comms, report, analysis)
-                if isinstance(o, dict) and o.get("llm_used")
-            )
-            if situation.get("source") == "groq":
-                llm_agents += 1
-
+            llm_agents = sum(1 for s in agent_steps if s.get("llm_used"))
             groq_ok, groq_msg = groq_client.verify_connection()
             mode = "groq_multi_agent" if groq_ok else "offline_pipeline"
 
@@ -178,9 +217,11 @@ class SwarmManager:
                 "allocations": allocations,
                 "routes": routes,
                 "comms": comms,
+                "verifier": verifier,
                 "report": report,
                 "analysis": analysis,
                 "transcript": transcript,
+                "agent_steps": agent_steps,
                 "agents_with_llm": llm_agents,
             }
         except Exception:

@@ -28,7 +28,11 @@ def main():
         allocations=allocations,
     )
     comms_out = send_alerts(context=ctx, plan=plan, allocations=allocations, routes=routes)
-    report = generate_report(plan, allocations, routes, context=ctx, comms=comms_out)
+    from agents.verifier import verify_outputs
+    verifier_out = verify_outputs(ctx, plan, allocations, routes, comms_out)
+    report = generate_report(
+        plan, allocations, routes, context=ctx, comms=comms_out, verifier=verifier_out
+    )
 
     print("\n=== Demo Summary ===")
     print(
