@@ -17,8 +17,10 @@ from core.scenario import (
     load_demo_scenario,
     zone_coords_for_scenario,
     is_approximate_map,
+    zoom_for_scenario,
+    detect_scenario_name,
 )
-from core.swarm import run_swarm
+from core.swarm import run_swarm, run_swarm_partial, run_swarm_complete
 from core import groq_client
 
 st.set_page_config(page_title="CrisisSwarm Dashboard", layout="wide")
@@ -78,6 +80,197 @@ SCENARIO_BUTTON_LABELS = {
     "Turkey Earthquake": "🏔️ Turkey Earthquake",
     "Chennai Cyclone": "🌪️ Chennai Cyclone",
 }
+
+# ---------------------------------------------------------------------------
+# PDF Export Support
+# ---------------------------------------------------------------------------
+import io
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+def generate_report_bytes(out: Dict[str, Any]) -> tuple[bytes, str, str]:
+    situation = out.get("situation", {})
+    plan = out.get("plan", {})
+    allocations = out.get("allocations", {}).get("allocations", [])
+    routes = out.get("routes", {}).get("routes", [])
+    verifier = out.get("verifier", {})
+    analysis = out.get("analysis", {})
+    report = out.get("report", {})
+    
+    if REPORTLAB_AVAILABLE:
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        styles = getSampleStyleSheet()
+        elements = []
+        
+        from datetime import datetime
+        elements.append(Paragraph("<b>CrisisSwarm Situation Report</b>", styles['Heading1']))
+        elements.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Scenario Summary</b>", styles['Heading2']))
+        elements.append(Paragraph(situation.get("summary", "N/A"), styles['Normal']))
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Disaster Details</b>", styles['Heading2']))
+        data = [["Type", "Location", "Severity"]]
+        data.append([str(situation.get("disaster_type", "")), str(situation.get("location", "")), str(situation.get("severity", ""))])
+        t = Table(data, colWidths=[150, 150, 150])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Triage Summary</b>", styles['Heading2']))
+        data = [["Zone", "Total", "Critical", "Serious", "Minor"]]
+        for zone, info in plan.get("triage", {}).get("zones", {}).items():
+            br = info.get("breakdown", {})
+            data.append([
+                str(zone), str(info.get("estimated_total", 0)),
+                str(br.get("Critical", 0)), str(br.get("Serious", 0)), str(br.get("Minor", 0))
+            ])
+        t = Table(data, colWidths=[100, 75, 75, 75, 75])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Resource Allocations</b>", styles['Heading2']))
+        data = [["Zone", "Ambulances", "Medical Teams"]]
+        for a in allocations:
+            data.append([str(a.get("zone", "")), str(a.get("ambulances", 0)), str(a.get("medical_teams", 0))])
+        t = Table(data, colWidths=[200, 100, 100])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Routing</b>", styles['Heading2']))
+        data = [["Zone", "Distance km", "ETA minutes", "Status"]]
+        for r in routes:
+            data.append([str(r.get("zone", "")), str(r.get("distance_km", "")), str(r.get("eta_minutes", "")), str(r.get("status", ""))])
+        t = Table(data, colWidths=[150, 80, 80, 90])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Verifier Result</b>", styles['Heading2']))
+        approved = "Yes" if verifier.get("approved") else "No"
+        elements.append(Paragraph(f"Approved: {approved}", styles['Normal']))
+        elements.append(Paragraph(f"Confidence: {verifier.get('confidence_score', 0)}%", styles['Normal']))
+        issues = verifier.get("issues_found", [])
+        if issues:
+            elements.append(Paragraph("Issues:", styles['Normal']))
+            for issue in issues:
+                elements.append(Paragraph(f"• {issue}", styles['Normal']))
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Recommended Actions</b>", styles['Heading2']))
+        for action in analysis.get("recommended_actions", []):
+            elements.append(Paragraph(f"• {action}", styles['Normal']))
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Paragraph("<b>Reporter Summary</b>", styles['Heading2']))
+        for p in report.get("text_summary", "").split('\n'):
+            if p.strip():
+                elements.append(Paragraph(p.strip(), styles['Normal']))
+        elements.append(Spacer(1, 12))
+        
+        elements.append(Spacer(1, 24))
+        elements.append(Paragraph("<i>Generated by CrisisSwarm · Microsoft Build AI Hackathon 2026</i>", styles['Normal']))
+        
+        doc.build(elements)
+        return buffer.getvalue(), "application/pdf", "sitrep.pdf"
+        
+    else:
+        from datetime import datetime
+        html = f"""<html><head><title>Situation Report</title>
+        <style>
+            body {{ font-family: Helvetica, sans-serif; }}
+            table {{ border-collapse: collapse; width: 100%; max-width: 800px; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid black; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; font-weight: bold; }}
+            h2 {{ margin-top: 20px; }}
+        </style></head><body>"""
+        html += f"<h1>CrisisSwarm Situation Report</h1><p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
+        
+        html += "<h2>Scenario Summary</h2>"
+        html += f"<p>{situation.get('summary', 'N/A')}</p>"
+        
+        html += "<h2>Disaster Details</h2>"
+        html += f"<table><tr><th>Type</th><th>Location</th><th>Severity</th></tr>"
+        html += f"<tr><td>{situation.get('disaster_type', '')}</td><td>{situation.get('location', '')}</td><td>{situation.get('severity', '')}</td></tr></table>"
+        
+        html += "<h2>Triage Summary</h2>"
+        html += "<table><tr><th>Zone</th><th>Total</th><th>Critical</th><th>Serious</th><th>Minor</th></tr>"
+        for zone, info in plan.get("triage", {}).get("zones", {}).items():
+            br = info.get("breakdown", {})
+            html += f"<tr><td>{zone}</td><td>{info.get('estimated_total', 0)}</td><td>{br.get('Critical', 0)}</td><td>{br.get('Serious', 0)}</td><td>{br.get('Minor', 0)}</td></tr>"
+        html += "</table>"
+        
+        html += "<h2>Resource Allocations</h2>"
+        html += "<table><tr><th>Zone</th><th>Ambulances</th><th>Medical Teams</th></tr>"
+        for a in allocations:
+            html += f"<tr><td>{a.get('zone', '')}</td><td>{a.get('ambulances', 0)}</td><td>{a.get('medical_teams', 0)}</td></tr>"
+        html += "</table>"
+        
+        html += "<h2>Routing</h2>"
+        html += "<table><tr><th>Zone</th><th>Distance km</th><th>ETA minutes</th><th>Status</th></tr>"
+        for r in routes:
+            html += f"<tr><td>{r.get('zone', '')}</td><td>{r.get('distance_km', '')}</td><td>{r.get('eta_minutes', '')}</td><td>{r.get('status', '')}</td></tr>"
+        html += "</table>"
+        
+        html += "<h2>Verifier Result</h2>"
+        approved = "Yes" if verifier.get("approved") else "No"
+        html += f"<p>Approved: {approved}<br/>Confidence: {verifier.get('confidence_score', 0)}%</p>"
+        issues = verifier.get("issues_found", [])
+        if issues:
+            html += "<p>Issues:</p><ul>"
+            for issue in issues:
+                html += f"<li>{issue}</li>"
+            html += "</ul>"
+            
+        html += "<h2>Recommended Actions</h2><ul>"
+        for action in analysis.get("recommended_actions", []):
+            html += f"<li>{action}</li>"
+        html += "</ul>"
+        
+        html += "<h2>Reporter Summary</h2>"
+        for p in report.get("text_summary", "").split('\n'):
+            if p.strip():
+                html += f"<p>{p.strip()}</p>"
+                
+        html += "<br/><br/><p><i>Generated by CrisisSwarm &middot; Microsoft Build AI Hackathon 2026</i></p>"
+        html += "</body></html>"
+        
+        return html.encode("utf-8"), "text/html", "sitrep.html"
 
 
 def _zone_rgb(breakdown: Dict[str, Any]) -> List[int]:
@@ -240,11 +433,16 @@ def render_map(
         get_radius=1800,
         pickable=True,
     )
+    
+    zoom = zoom_for_scenario(scenario_text)
+    name = detect_scenario_name(scenario_text)
+    pitch = 45 if name and "Earthquake" in name else 30
+    
     view = pdk.ViewState(
         latitude=float(df["lat"].mean()),
         longitude=float(df["lon"].mean()),
-        zoom=10,
-        pitch=30,
+        zoom=zoom,
+        pitch=pitch,
     )
     tooltip = {
         "html": (
@@ -350,15 +548,26 @@ def _render_swarm_results(out: Dict[str, Any]) -> None:
         st.header("Reporter Summary")
         report = out.get("report", {})
         st.write(report.get("text_summary", "No report available."))
-        st.download_button(
-            "⬇️ Download full report JSON",
-            data=json.dumps(
-                {**report, "analysis": analysis, "verifier": verifier},
-                indent=2,
-            ),
-            file_name="crisis_report.json",
-            mime="application/json",
-        )
+        
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            st.download_button(
+                "⬇️ Download full report JSON",
+                data=json.dumps(
+                    {**report, "analysis": analysis, "verifier": verifier},
+                    indent=2,
+                ),
+                file_name="crisis_report.json",
+                mime="application/json",
+            )
+        with btn_col2:
+            file_bytes, mime_type, file_name = generate_report_bytes(out)
+            st.download_button(
+                "⬇️ Download PDF Report" if REPORTLAB_AVAILABLE else "⬇️ Download HTML Report",
+                data=file_bytes,
+                file_name=file_name,
+                mime=mime_type,
+            )
 
         with st.expander("Raw Outputs"):
             st.json({
@@ -380,7 +589,7 @@ def _render_swarm_results(out: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Session state — single key for text_area (fixes button / widget conflict)
+# Session state
 # ---------------------------------------------------------------------------
 if "scenario_input" not in st.session_state:
     st.session_state["scenario_input"] = load_demo_scenario()
@@ -388,9 +597,13 @@ if "swarm_out" not in st.session_state:
     st.session_state["swarm_out"] = None
 if "last_scenario_text" not in st.session_state:
     st.session_state["last_scenario_text"] = st.session_state["scenario_input"]
+if "approval_stage" not in st.session_state:
+    st.session_state["approval_stage"] = "idle"
+if "partial_out" not in st.session_state:
+    st.session_state["partial_out"] = None
 
 # ---------------------------------------------------------------------------
-# Scenario selector — 5 buttons
+# Scenario selector
 # ---------------------------------------------------------------------------
 st.subheader("Disaster Scenario")
 
@@ -405,6 +618,8 @@ for i, name in enumerate(scenario_names):
         ):
             st.session_state["scenario_input"] = SCENARIOS[name]
             st.session_state["swarm_out"] = None
+            st.session_state["partial_out"] = None
+            st.session_state["approval_stage"] = "idle"
             st.rerun()
 
 st.text_area(
@@ -421,18 +636,92 @@ st.text_area(
 # ACTIVATE SWARM
 # ---------------------------------------------------------------------------
 if st.button("🚨 ACTIVATE SWARM", type="primary", use_container_width=True):
-    with st.spinner("Running multi-agent pipeline (Groq + verifier)..."):
-        st.session_state["swarm_out"] = run_swarm(st.session_state["scenario_input"])
+    with st.spinner("Running initial swarm (up to Routing)..."):
+        st.session_state["partial_out"] = run_swarm_partial(st.session_state["scenario_input"])
         st.session_state["last_scenario_text"] = st.session_state["scenario_input"]
+        st.session_state["approval_stage"] = "awaiting_approval"
+        st.session_state["swarm_out"] = None
+        st.rerun()
 
-out: Optional[Dict[str, Any]] = st.session_state.get("swarm_out")
+if st.session_state["approval_stage"] == "awaiting_approval":
+    out = st.session_state["partial_out"]
+    if not out:
+        st.session_state["approval_stage"] = "idle"
+        st.rerun()
 
-if not out:
-    st.info("Pick a scenario (or write your own) and click **🚨 ACTIVATE SWARM**.")
-else:
     if out.get("error"):
         st.error(out.get("error"))
         if out.get("trace"):
             st.code(out["trace"])
+        if st.button("Reset"):
+            st.session_state["approval_stage"] = "idle"
+            st.session_state["partial_out"] = None
+            st.rerun()
+    else:
+        tab_ops, tab_map, tab_trace = st.tabs(["📋 Operations", "🗺️ Map View", "🔍 Agent Trace"])
+
+        with tab_ops:
+            situation = out.get("situation", {})
+            plan = out.get("plan", {})
+            allocations = out.get("allocations", {})
+            routes = out.get("routes", {})
+
+            st.subheader("Situation Understanding")
+            st.write(situation.get("summary", "No summary available."))
+
+            st.subheader("Triage Zones")
+            for z, info in plan.get("triage", {}).get("zones", {}).items():
+                st.write(f"- **{z}**: {info.get('estimated_total', 0)} casualties")
+
+            st.subheader("Resource Allocations")
+            for a in allocations.get("allocations", []):
+                st.write(f"- **{a.get('zone', '')}**: {a.get('ambulances', 0)} ambulances, {a.get('medical_teams', 0)} medical teams")
+
+            st.subheader("Routing ETAs")
+            for r in routes.get("routes", []):
+                st.write(f"- **{r.get('zone', '')}**: ETA {r.get('eta_minutes', 0)} min")
+
+            st.warning("⚠️ Review the plan above before broadcasting alerts to hospitals and responders.")
+            
+            st.markdown("---")
+            approved = st.checkbox("I have reviewed the plan and approve broadcasting communications")
+            
+            col1, col2 = st.columns(2)
+            if approved:
+                if col1.button("✅ APPROVE & SEND COMMS", type="primary"):
+                    with st.spinner("Completing swarm pipeline..."):
+                        st.session_state["swarm_out"] = run_swarm_complete(
+                            st.session_state["partial_out"], 
+                            st.session_state["last_scenario_text"]
+                        )
+                        st.session_state["approval_stage"] = "complete"
+                        st.rerun()
+                        
+            if col2.button("❌ Cancel & Re-run"):
+                st.session_state["approval_stage"] = "idle"
+                st.session_state["partial_out"] = None
+                st.session_state["swarm_out"] = None
+                st.rerun()
+
+        with tab_map:
+            st.subheader("Zone map")
+            render_map(st.session_state["last_scenario_text"], plan, routes)
+
+        with tab_trace:
+            render_agent_trace(out.get("agent_steps", []))
+
+elif st.session_state["approval_stage"] == "complete":
+    out = st.session_state["swarm_out"]
+    if out.get("error"):
+        st.error(out.get("error"))
+        if out.get("trace"):
+            st.code(out["trace"])
+        if st.button("Reset"):
+            st.session_state["approval_stage"] = "idle"
+            st.session_state["partial_out"] = None
+            st.session_state["swarm_out"] = None
+            st.rerun()
     else:
         _render_swarm_results(out)
+else:
+    st.info("Pick a scenario (or write your own) and click **🚨 ACTIVATE SWARM**.")

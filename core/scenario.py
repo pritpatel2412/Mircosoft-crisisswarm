@@ -168,7 +168,7 @@ def load_scenario(name: str) -> str:
     return SCENARIOS.get(name, MUMBAI_SCENARIO)
 
 
-def _detect_scenario_name(scenario_text: str) -> str | None:
+def detect_scenario_name(scenario_text: str) -> str | None:
     """Match built-in scenarios by exact text, strong city token, or 2+ zone keywords."""
     stripped = scenario_text.strip()
     for name, text in SCENARIOS.items():
@@ -195,6 +195,22 @@ def _detect_scenario_name(scenario_text: str) -> str | None:
     return None
 
 
+def zoom_for_scenario(scenario_text: str) -> int:
+    name = detect_scenario_name(scenario_text)
+    if name == "Mumbai Earthquake":
+        return 11
+    elif name == "Florida Hurricane":
+        return 10
+    elif name == "Tokyo Flood":
+        return 11
+    elif name == "Turkey Earthquake":
+        return 8
+    elif name == "Chennai Cyclone":
+        return 10
+    else:
+        return 9
+
+
 def _closest_city_centre(scenario_text: str) -> tuple[float, float]:
     lower = scenario_text.lower()
     for city, coords in _CITY_FALLBACK.items():
@@ -214,7 +230,7 @@ def _synthetic_zones(centre: tuple[float, float]) -> dict[str, tuple[float, floa
 
 def is_approximate_map(scenario_text: str, coords: dict) -> bool:
     """True when map uses synthetic placeholder zones."""
-    if _detect_scenario_name(scenario_text):
+    if detect_scenario_name(scenario_text):
         return False
     return all(name in SYNTHETIC_ZONE_NAMES for name in coords.keys())
 
@@ -227,7 +243,7 @@ def zone_coords_for_scenario(scenario_text: str) -> dict:
     Unknown text: 3 placeholder zones near the closest recognised city,
     or (20.0, 78.0) if no city is found.
     """
-    name = _detect_scenario_name(scenario_text)
+    name = detect_scenario_name(scenario_text)
     if name:
         return dict(_SCENARIO_COORDS[name])
 
@@ -236,7 +252,7 @@ def zone_coords_for_scenario(scenario_text: str) -> dict:
 
 
 def origin_for_scenario(scenario_text: str) -> tuple:
-    name = _detect_scenario_name(scenario_text)
+    name = detect_scenario_name(scenario_text)
     if name:
         return _SCENARIO_ORIGINS[name]
     coords = zone_coords_for_scenario(scenario_text)
@@ -262,4 +278,6 @@ __all__ = [
     "zone_coords_for_scenario",
     "origin_for_scenario",
     "is_approximate_map",
+    "detect_scenario_name",
+    "zoom_for_scenario",
 ]

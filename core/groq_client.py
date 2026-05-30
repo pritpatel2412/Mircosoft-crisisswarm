@@ -71,25 +71,7 @@ def _error_message(exc: BaseException) -> str:
 
 
 def is_shared_quota_error(exc: BaseException) -> bool:
-    """Account/org daily limits — rotating API keys will not help."""
-    msg = _error_message(exc)
-    shared_markers = (
-        "tokens per day",
-        "tpd",
-        "token limit",
-        "daily",
-        "per day",
-        "organization",
-        "org limit",
-        "usage limit",
-        "insufficient_quota",
-    )
-    if any(m in msg for m in shared_markers):
-        return True
-    if isinstance(exc, APIStatusError) and exc.status_code == 429:
-        body = msg
-        if "day" in body or "tpd" in body:
-            return True
+    """Account/org daily limits — but user might have multiple accounts, so always rotate."""
     return False
 
 
@@ -114,6 +96,12 @@ def is_rotatable_error(exc: BaseException) -> bool:
             "too many requests",
             "authentication",
             "invalid api key",
+            "tokens per day",
+            "tpd",
+            "token limit",
+            "daily",
+            "per day",
+            "insufficient_quota",
         )
     )
 

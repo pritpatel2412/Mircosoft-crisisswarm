@@ -6,3 +6,4 @@ azure-maps-route
 azure-identity
 pydeck
 pandas
+reportlab  # optional — for PDF export

@@ -96,6 +96,8 @@ Desktop.ini
 logs/
 report.json
 crisis_report.json
+*.pdf
+*.html
 *.tmp
 *.temp
 *.bak

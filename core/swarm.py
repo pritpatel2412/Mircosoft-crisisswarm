@@ -146,6 +146,12 @@ class SwarmManager:
     """Runs all agents in sequence with shared SwarmContext."""
 
     def run_full_scenario(self, scenario_text: str) -> Dict[str, Any]:
+        partial = self.run_partial_scenario(scenario_text)
+        if partial.get("error"):
+            return partial
+        return self.run_complete_scenario(partial, scenario_text)
+
+    def run_partial_scenario(self, scenario_text: str) -> Dict[str, Any]:
         groq_client.reset_swarm_session()
         agent_steps: List[Dict[str, Any]] = []
         try:
@@ -159,9 +165,6 @@ class SwarmManager:
             commander_mod = importlib.import_module("agents.commander")
             resource_mod = importlib.import_module("agents.resource")
             routing_mod = importlib.import_module("agents.routing")
-            comms_mod = importlib.import_module("agents.comms")
-            verifier_mod = importlib.import_module("agents.verifier")
-            reporter_mod = importlib.import_module("agents.reporter")
 
             print("[Swarm] Commander + Triage...")
             commander = getattr(commander_mod, "Commander")()
@@ -182,6 +185,30 @@ class SwarmManager:
                 allocations=allocations,
             )
             agent_steps.append(step_metadata(routes, "Routing"))
+
+            return {
+                "situation": situation,
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "agent_steps": agent_steps,
+            }
+        except Exception:
+            return {"error": "Partial Swarm failed", "trace": traceback.format_exc()}
+
+    def run_complete_scenario(self, partial_out: Dict[str, Any], scenario_text: str) -> Dict[str, Any]:
+        agent_steps = partial_out.get("agent_steps", [])
+        situation = partial_out.get("situation", {})
+        plan = partial_out.get("plan", {})
+        allocations = partial_out.get("allocations", {})
+        routes = partial_out.get("routes", {})
+
+        try:
+            ctx = SwarmContext(scenario_text=scenario_text, situation=situation)
+
+            comms_mod = importlib.import_module("agents.comms")
+            verifier_mod = importlib.import_module("agents.verifier")
+            reporter_mod = importlib.import_module("agents.reporter")
 
             print("[Swarm] Comms...")
             comms = comms_mod.send_alerts(
@@ -250,7 +277,7 @@ class SwarmManager:
                 "agent_errors": agent_errors,
             }
         except Exception:
-            return {"error": "SwarmManager failed", "trace": traceback.format_exc()}
+            return {"error": "Complete Swarm failed", "trace": traceback.format_exc()}
 
 
 def run_swarm(disaster_message: str) -> Dict[str, Any]:
@@ -264,6 +291,23 @@ def run_swarm(disaster_message: str) -> Dict[str, Any]:
         print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
 
     return SwarmManager().run_full_scenario(disaster_message)
+
+
+def run_swarm_partial(disaster_message: str) -> Dict[str, Any]:
+    if groq_client.is_configured():
+        ok, msg = groq_client.verify_connection(use_cache=True)
+        if ok:
+            print(f"[Swarm] Groq configured — {msg}")
+        else:
+            print(f"[Swarm] Groq ping failed (agents may use offline fallbacks): {msg}")
+    else:
+        print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
+
+    return SwarmManager().run_partial_scenario(disaster_message)
+
+
+def run_swarm_complete(partial_out: Dict[str, Any], disaster_message: str) -> Dict[str, Any]:
+    return SwarmManager().run_complete_scenario(partial_out, disaster_message)
 
 
 if __name__ == "__main__":

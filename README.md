@@ -12,6 +12,9 @@ CrisisSwarm is a multi-agent disaster response system. Specialized agents share 
 - **Seven specialist agents** — Commander, Triage, Resource, Routing, Comms, **Verifier**, Reporter
 - **Cross-agent analysis** — risks, priority zones, recommended actions
 - **5 built-in scenarios** — Mumbai, Florida, Tokyo, Turkey, Chennai
+- **Dynamic Auto-Zoom Map** — Map automatically adjusts pitch and zoom for the selected scenario
+- **Human-in-the-Loop Approval** — Pause the pipeline after routing for operator review before Comms are dispatched
+- **PDF Report Export** — Generate styled PDF situation reports with `reportlab`
 - **Dual Groq API keys** — automatic rotation on rate limits (`GROQ_API_KEY` + `GROQ_API_KEY_2`)
 - **pydeck map** — color-coded triage zones and route ETAs for all 5 scenarios
 - **Azure Maps routing** — live route API when `AZURE_MAPS_KEY` is set; haversine fallback otherwise
