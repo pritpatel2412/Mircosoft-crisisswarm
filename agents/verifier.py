@@ -32,6 +32,21 @@ Return JSON only:
 Approve only if the plan is safe to execute with minor or no corrections."""
 
 
+def _parse_approved(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "approved", "1")
+    return bool(value)
+
+
+def _parse_confidence(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, min(100, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
 def _offline_verify(outputs: Dict[str, Any]) -> Dict[str, Any]:
     issues = []
     corrections = []
@@ -93,9 +108,9 @@ class VerifierAgent:
                 "system_message": SYSTEM_MESSAGE,
                 "narrative": llm_out.get("narrative", ""),
                 "issues_found": llm_out.get("issues_found", []),
-                "approved": bool(llm_out.get("approved", False)),
+                "approved": _parse_approved(llm_out.get("approved", False)),
                 "corrections": llm_out.get("corrections", []),
-                "confidence_score": int(llm_out.get("confidence_score", 0)),
+                "confidence_score": _parse_confidence(llm_out.get("confidence_score", 0)),
                 "llm_used": llm_out.get("llm_used", False),
                 "model_used": llm_out.get("model_used", "offline"),
                 "latency_ms": llm_out.get("latency_ms", 0),

@@ -25,22 +25,50 @@ def build_analysis_payload(
     context: Optional[SwarmContext] = None,
     comms: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    def offline():
-        return {
-            "scenario_assessment": (
+    def offline(*, rate_limited: bool = False, llm_failed: bool = False):
+        if rate_limited or llm_failed:
+            assessment = (
+                "Offline analysis: Groq quota reached or API call failed. "
+                "Heuristic synthesis from agent outputs below."
+            )
+            risks = ["Groq API unavailable (quota or transient error)"]
+            actions = [
+                "Wait for Groq limits to reset or use a second Groq account for GROQ_API_KEY_2",
+                "Re-run the swarm after limits reset",
+            ]
+        else:
+            assessment = (
                 "Offline analysis. Configure GROQ_API_KEY for full multi-agent synthesis."
-            ),
+            )
+            risks = ["Groq not configured"]
+            actions = ["Set GROQ_API_KEY and re-run the swarm."]
+        return {
+            "scenario_assessment": assessment,
             "priority_zones": plan.get("priority_order")
             or list(plan.get("triage", {}).get("zones", {}).keys()),
-            "key_risks": ["Groq not configured"],
-            "recommended_actions": ["Set GROQ_API_KEY and re-run the swarm."],
+            "key_risks": risks,
+            "recommended_actions": actions,
             "coordination_notes": "",
             "source": "offline",
             "llm_used": False,
         }
 
+    def fallback():
+        blocked, _ = groq_client.is_temporarily_unavailable()
+        if blocked:
+            return offline(rate_limited=True)
+        if groq_client.is_configured():
+            return offline(llm_failed=True)
+        return offline()
+
     if not groq_client.is_configured():
         return offline()
+
+    blocked, block_reason = groq_client.is_temporarily_unavailable()
+    if blocked:
+        out = offline(rate_limited=True)
+        out["llm_error"] = block_reason
+        return out
 
     user = (
         f"Scenario:\n{scenario_text}\n\n"
@@ -53,7 +81,7 @@ def build_analysis_payload(
     if context:
         user = context.prompt_block(user)
 
-    result = agent_json_step("Analysis", ANALYSIS_SYSTEM, user, offline)
+    result = agent_json_step("Analysis", ANALYSIS_SYSTEM, user, fallback)
     result["source"] = "groq" if result.get("llm_used") else "offline"
     for key in ("priority_zones", "key_risks", "recommended_actions"):
         if key not in result or not isinstance(result[key], list):

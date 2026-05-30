@@ -111,7 +111,7 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
 
 def _situation_step(situation: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     groq_live = situation.get("source") == "groq"
-    return {
+    step: Dict[str, Any] = {
         "agent": "Situation",
         "llm_used": groq_live,
         "model_used": groq_client.resolve_model() if groq_live else "offline",
@@ -119,12 +119,34 @@ def _situation_step(situation: Dict[str, Any], latency_ms: int) -> Dict[str, Any
         "mode": "groq" if groq_live else "offline",
         "llm_error": situation.get("parse_error"),
     }
+    key_used = situation.get("key_used") or groq_client.get_last_key_used()
+    if groq_live and key_used is not None:
+        step["key_used"] = key_used
+    return step
+
+
+def _collect_agent_errors(outputs: Dict[str, Any]) -> List[str]:
+    """Surface per-agent failures that would otherwise be silent in the UI."""
+    errors: List[str] = []
+    for key, label in (
+        ("plan", "Commander"),
+        ("allocations", "Resource"),
+        ("routes", "Routing"),
+        ("comms", "Comms"),
+        ("verifier", "Verifier"),
+        ("report", "Reporter"),
+    ):
+        blob = outputs.get(key) or {}
+        if blob.get("error"):
+            errors.append(f"{label}: {blob['error']}")
+    return errors
 
 
 class SwarmManager:
     """Runs all agents in sequence with shared SwarmContext."""
 
     def run_full_scenario(self, scenario_text: str) -> Dict[str, Any]:
+        groq_client.reset_swarm_session()
         agent_steps: List[Dict[str, Any]] = []
         try:
             print("[Swarm] Parsing disaster situation...")
@@ -145,7 +167,7 @@ class SwarmManager:
             commander = getattr(commander_mod, "Commander")()
             plan = commander.run_triage_then_plan(scenario_text, context=ctx)
             agent_steps.append(step_metadata(plan, "Commander"))
-            triage = plan.get("triage", {})
+            triage = plan.get("triage") or {}
             if triage:
                 agent_steps.append(step_metadata(triage, "Triage"))
 
@@ -204,13 +226,15 @@ class SwarmManager:
             transcript = build_transcript(ctx, outputs)
 
             llm_agents = sum(1 for s in agent_steps if s.get("llm_used"))
-            groq_ok, groq_msg = groq_client.verify_connection()
-            mode = "groq_multi_agent" if groq_ok else "offline_pipeline"
+            agent_errors = _collect_agent_errors(outputs)
+            mode = "groq_multi_agent" if llm_agents >= 3 else (
+                "groq_partial" if llm_agents > 0 else "offline_pipeline"
+            )
 
             return {
                 "mode": mode,
-                "groq_live": groq_ok,
-                "groq_status": groq_msg,
+                "groq_live": llm_agents > 0,
+                "groq_status": f"{llm_agents} of {len(agent_steps)} agents used Groq",
                 "groq_model": groq_client.resolve_model() if groq_client.is_configured() else None,
                 "situation": situation,
                 "plan": plan,
@@ -223,6 +247,7 @@ class SwarmManager:
                 "transcript": transcript,
                 "agent_steps": agent_steps,
                 "agents_with_llm": llm_agents,
+                "agent_errors": agent_errors,
             }
         except Exception:
             return {"error": "SwarmManager failed", "trace": traceback.format_exc()}
@@ -230,11 +255,11 @@ class SwarmManager:
 
 def run_swarm(disaster_message: str) -> Dict[str, Any]:
     if groq_client.is_configured():
-        ok, msg = groq_client.verify_connection()
+        ok, msg = groq_client.verify_connection(use_cache=True)
         if ok:
-            print(f"[Swarm] Groq LIVE — {msg}")
+            print(f"[Swarm] Groq configured — {msg}")
         else:
-            print(f"[Swarm] OFFLINE MODE (API failed): {msg}")
+            print(f"[Swarm] Groq ping failed (agents may use offline fallbacks): {msg}")
     else:
         print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
 

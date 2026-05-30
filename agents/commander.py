@@ -80,13 +80,17 @@ class Commander:
                 user = context.prompt_block(user)
 
             llm_plan = agent_json_step(AGENT_NAME, PLAN_SYSTEM, user, fallback)
-            task_assignments = llm_plan.get("task_assignments", fallback()["task_assignments"])
+            fb = fallback()
+            task_assignments = llm_plan.get("task_assignments")
+            if not task_assignments:
+                task_assignments = fb["task_assignments"]
+            priority_order = llm_plan.get("priority_order") or fb.get("priority_order", [])
 
             plan = {
                 "agent": AGENT_NAME,
                 "system_message": SYSTEM_MESSAGE,
                 "narrative": llm_plan.get("narrative", "Operational plan ready."),
-                "priority_order": llm_plan.get("priority_order", []),
+                "priority_order": priority_order,
                 "triage": triage_out,
                 "task_assignments": task_assignments,
                 "llm_used": llm_plan.get("llm_used", False),

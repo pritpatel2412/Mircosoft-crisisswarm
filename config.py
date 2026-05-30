@@ -26,7 +26,9 @@ class Settings:
 	All credentials must be supplied by the environment in production.
 	"""
 	GROQ_API_KEY: Optional[str] = None
+	GROQ_API_KEY_2: Optional[str] = None
 	GROQ_MODEL: Optional[str] = "llama-3.3-70b-versatile"
+	GROQ_MAX_TOKENS: Optional[int] = 1024
 	AZURE_MAPS_KEY: Optional[str] = None
 	STREAMLIT_PORT: Optional[int] = 8501
 	SERVICE_NAME: Optional[str] = "CrisisSwarm"
@@ -51,7 +53,9 @@ def load_settings() -> Settings:
 
 	s = Settings(
 		GROQ_API_KEY=_strip_key(getenv("GROQ_API_KEY")),
+		GROQ_API_KEY_2=_strip_key(getenv("GROQ_API_KEY_2")),
 		GROQ_MODEL=getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
+		GROQ_MAX_TOKENS=int(getenv("GROQ_MAX_TOKENS", 1024)),
 		AZURE_MAPS_KEY=getenv("AZURE_MAPS_KEY"),
 		STREAMLIT_PORT=int(getenv("STREAMLIT_PORT", 8501)),
 		SERVICE_NAME=getenv("SERVICE_NAME", "CrisisSwarm"),
@@ -84,4 +88,5 @@ if __name__ == "__main__":
 	# quick local check
 	print("Loaded settings (redacted):")
 	print("GROQ_API_KEY:", "set" if settings.GROQ_API_KEY else "NOT SET")
+	print("GROQ_API_KEY_2:", "set" if settings.GROQ_API_KEY_2 else "NOT SET")
 	print("AZURE_MAPS_KEY:", "set" if settings.AZURE_MAPS_KEY else "NOT SET")
