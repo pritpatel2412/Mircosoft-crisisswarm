@@ -1,11 +1,24 @@
 # --- Secrets (never commit) ---
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 *.pem
 *.key
+*.p12
 credentials.json
 secrets.json
+**/secrets.toml
+
+# Common accidental secret filenames
+.env.local
+.env.production
+.env.development
+.env.staging
+
+# Groq / API key backup files
+*.secret
+*_secret.*
+*_api_key*
 
 # Keep the template
 !.env.example
@@ -28,6 +41,7 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -36,15 +50,21 @@ MANIFEST
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
 .nox/
+.hypothesis/
+pip-log.txt
+pip-delete-this-directory.txt
 
 # --- Virtual environments ---
 .venv/
 venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 
 # --- IDEs & editors ---
 .vscode/
@@ -54,6 +74,8 @@ ENV/
 *~
 .project
 .pydevproject
+*.sublime-project
+*.sublime-workspace
 
 # --- OS ---
 .DS_Store
@@ -73,11 +95,24 @@ Desktop.ini
 *.log
 logs/
 report.json
+crisis_report.json
+*.pdf
+*.html
 *.tmp
 *.temp
+*.bak
+
+# --- Local test / scratch scripts ---
+_test_*.py
+scratch/
+tmp/
 
 # --- Docker (local overrides) ---
 docker-compose.override.yml
 
-# --- Cursor / local tooling (optional) ---
+# --- Cursor / local tooling ---
 .cursor/
+agent-transcripts/
+
+# --- Generated assets (screenshots, local uploads) ---
+assets/

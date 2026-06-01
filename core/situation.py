@@ -68,9 +68,18 @@ def parse_situation(scenario_text: str) -> Dict[str, Any]:
     if not groq_client.is_configured():
         return _parse_situation_offline(scenario_text)
 
+    blocked, block_reason = groq_client.is_temporarily_unavailable()
+    if blocked:
+        offline = _parse_situation_offline(scenario_text)
+        offline["parse_error"] = block_reason
+        return offline
+
     try:
         result = groq_client.chat_json(SITUATION_SYSTEM, scenario_text)
         result["source"] = "groq"
+        key_used = groq_client.get_last_key_used()
+        if key_used is not None:
+            result["key_used"] = key_used
         if "zones" not in result or not isinstance(result["zones"], list):
             result["zones"] = []
         for key in (

@@ -2,17 +2,25 @@
 import os
 import sys
 import json
-from typing import Any, Dict, List, Optional
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import pandas as pd
+import pydeck as pdk
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from core.scenario import load_demo_scenario
-from core.swarm import run_swarm, finalize_mission, run_aftershock_rerun
+from core.scenario import (
+    SCENARIOS,
+    load_demo_scenario,
+    zone_coords_for_scenario,
+    is_approximate_map,
+    zoom_for_scenario,
+    detect_scenario_name,
+)
+from core.swarm import run_swarm, finalize_mission, run_aftershock_rerun, run_swarm_partial, run_swarm_complete
 from core.arena import run_arena, STRATEGIES, _rank_results, _build_comparison
 from core.human_gate import needs_human_gate
 from core.sitrep import build_sitrep_text, build_responsible_ai_scorecard
@@ -31,7 +39,6 @@ st.set_page_config(
 )
 
 # Load CrisisSwarm Premium stylesheet
-import os
 css_path = os.path.join(os.path.dirname(__file__), "style.css")
 if os.path.exists(css_path):
     with open(css_path, "r", encoding="utf-8") as f:
@@ -83,13 +90,33 @@ with st.sidebar:
 
     st.divider()
     if groq_client.is_configured():
-        ok, msg = groq_client.verify_connection()
-        if ok:
-            st.success("Groq AI live")
+        blocked, block_reason = groq_client.is_temporarily_unavailable()
+        if blocked:
+            st.warning(
+                "**Groq quota reached** during the last swarm run on this server. "
+                "Further agents will use offline heuristics until you start a new run "
+                "after limits reset.\n\n"
+                f"{block_reason}"
+            )
         else:
-            st.error(f"Groq error: {msg}")
+            ok, msg = groq_client.verify_connection(use_cache=True)
+            key_info = groq_client.get_active_key_info()
+            if ok:
+                if key_info["keys_available"] >= 2:
+                    st.success(
+                        f"Groq live — dual key rotation enabled "
+                        f"(Key {key_info['active_key']} active). {msg}"
+                    )
+                else:
+                    st.success(f"Groq live — {msg}")
+            else:
+                st.error(
+                    "**Groq key is in `.env` but the API is NOT working.** "
+                    "The app runs on offline heuristics until fixed.\n\n"
+                    f"Error: {msg}"
+                )
     else:
-        st.warning("Offline mode — rule-based agents")
+        st.warning("No Groq API key. Set `GROQ_API_KEY` in `.env` for live AI agents.")
 
 # ── Agent colour map ──────────────────────────────────────────────────────────
 AGENT_COLORS: Dict[str, str] = {
@@ -100,6 +127,14 @@ AGENT_COLORS: Dict[str, str] = {
     "Marketplace": "#e07b39", "WhatIf": "#5a9e6f", "AfterAction": "#8b6bad",
     "Multilingual": "#c45c8a", "Debate:Resource": "#c55a11",
     "Debate:Routing": "#c00000", "Debate:Commander": "#1a5276",
+}
+
+SCENARIO_BUTTON_LABELS = {
+    "Mumbai Earthquake": "🌏 Mumbai Earthquake",
+    "Florida Hurricane": "🌀 Florida Hurricane",
+    "Tokyo Flood": "🌊 Tokyo Flood",
+    "Turkey Earthquake": "🏔️ Turkey Earthquake",
+    "Chennai Cyclone": "🌪️ Chennai Cyclone",
 }
 
 
@@ -143,7 +178,7 @@ def render_debate(debate: Dict[str, Any]) -> None:
         "Agents publish conflicting proposals before the plan is finalised. "
         "Commander mediates and issues the binding decision."
     )
-    round_colors = {"Resource": "var(--colors-primary)", "Routing": "var(--colors-sunshine-500)", "Commander": "var(--colors-ink)"}
+    round_colors = {"Resource": "var(--colors-primary)", "Routing": "var(--colors-sunset-500)", "Commander": "var(--colors-ink)"}
     for rnd in debate.get("rounds", []):
         speaker = rnd.get("speaker", "?")
         color = round_colors.get(speaker, "#555")
@@ -242,46 +277,14 @@ def render_arena(arena: Dict[str, Any]) -> None:
         ]):
             data = comparison.get(key, {}).get("values", {})
             if data:
+                import pandas as pd
+                df = pd.DataFrame({
+                    "Strategy": list(data.keys()),
+                    title: list(data.values())
+                })
                 with chart_cols[i]:
-                    st.markdown(f"**{title}**")
-                    st.bar_chart(pd.Series(data))
-
-    # Round-by-round details
-    for rnd in arena.get("rounds", []):
-        st.markdown(f"### Round {rnd.get('round')} — {rnd.get('label', '').replace('_', ' ').title()}")
-        cols = st.columns(len(rnd.get("results", [])) or 1)
-        for i, r in enumerate(rnd.get("results", [])):
-            m = r.get("metrics", {})
-            badge = "🏆 " if r.get("winner") else ""
-            with cols[i]:
-                v_color = "normal" if r.get("verification_status") == "PASSED" else "inverse"
-                st.metric(f"{badge}{r.get('label','?')}", m.get("mission_score", 0), label_visibility="visible")
-                st.caption(
-                    f"Lives saved: {m.get('lives_saved', 0)} | "
-                    f"ETA: {m.get('response_time_min', 0)} min | "
-                    f"Coverage: {m.get('coverage_pct', 0)}%"
-                )
-                st.caption(f"Verification: {r.get('verification_status', '?')}")
-
-    # Zone heatmap (lives saved per zone per strategy, last round only)
-    last_round = arena.get("rounds", [{}])[-1]
-    heatmap_rows = []
-    for r in last_round.get("results", []):
-        snap = r.get("world_snapshot", {})
-        for z in snap.get("zones", []):
-            heatmap_rows.append({
-                "Strategy": r.get("label", "?"),
-                "Zone": z.get("name", "?"),
-                "Critical remaining": z.get("critical", 0),
-                "Delay (min)": z.get("response_delay_min", 0),
-            })
-    if heatmap_rows:
-        st.markdown("**Zone state after final round**")
-        st.dataframe(
-            pd.DataFrame(heatmap_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
+                    st.subheader(title)
+                    st.bar_chart(df.set_index("Strategy"), use_container_width=True)
 
     with st.expander("Full arena JSON"):
         st.json(arena)
@@ -379,11 +382,14 @@ def render_mission(mission: Dict[str, Any], off: str) -> None:
     # ── Verification ──────────────────────────────────────────────────────────
     v_status = verification.get("verification_status", "UNKNOWN")
     if v_status == "PASSED":
-        st.success(f"Verification PASSED (confidence {verification.get('confidence_score', 0):.2f})")
+        st.success(f"Verification PASSED (confidence {verification.get('confidence_score', 0)})")
     elif v_status == "FAILED":
-        st.error(f"Verification FAILED (confidence {verification.get('confidence_score', 0):.2f})")
+        st.error(f"Verification FAILED (confidence {verification.get('confidence_score', 0)})")
         for issue in verification.get("issues_found", []):
-            st.warning(f"[{issue.get('severity')}] {issue.get('type')}: {issue.get('message')}")
+            if isinstance(issue, dict):
+                st.warning(f"[{issue.get('severity')}] {issue.get('type')}: {issue.get('message')}")
+            else:
+                st.warning(str(issue))
 
     # ── Responsible AI panel ──────────────────────────────────────────────────
     render_responsible_ai_panel(mission)
@@ -464,8 +470,25 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-default_scenario = load_demo_scenario()
-scenario_text = st.text_area("Disaster scenario", value=default_scenario, height=120)
+# Preset scenarios
+st.subheader("Preset Presets")
+scenario_names = list(SCENARIOS.keys())
+btn_cols = st.columns(5)
+for i, name in enumerate(scenario_names):
+    with btn_cols[i]:
+        if st.button(
+            SCENARIO_BUTTON_LABELS[name],
+            use_container_width=True,
+            key=f"scenario_btn_{i}",
+        ):
+            st.session_state.mission = None
+            # Update the text area below by setting the value in session state
+            st.session_state["scenario_input_value"] = SCENARIOS[name]
+
+if "scenario_input_value" not in st.session_state:
+    st.session_state["scenario_input_value"] = default_scenario
+
+scenario_text = st.text_area("Disaster scenario", value=st.session_state["scenario_input_value"], height=120)
 
 if st.button("ACTIVATE SWARM", type="primary"):
     text = _scenario_text(scenario_text, conflict_demo)

@@ -1,4 +1,4 @@
-"""Verifier Agent — rule-based operational feasibility checks before reporting."""
+"""Verifier Agent — rule-based and LLM-based operational feasibility checks."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from core.context import SwarmContext
+from core.agent_llm import agent_json_step
 
 AGENT_NAME = "VerifierAgent"
 
@@ -16,6 +17,23 @@ SYSTEM_MESSAGE = (
 )
 
 _HIGH_SEVERITIES = frozenset({"HIGH", "CRITICAL"})
+
+# SYSTEM PROMPT FOR LLM VERIFIER
+VERIFIER_SYSTEM = """You are an emergency operations verifier. Review all agent outputs for:
+- Casualty totals matching zone sums
+- Resource levels reasonable for casualty counts
+- Route ETAs plausible given blocked roads
+- Comms messages actionable and not contradictory
+
+Return JSON only:
+{
+  "narrative": "1-2 sentence verification summary",
+  "issues_found": ["specific issue strings"],
+  "approved": true or false,
+  "corrections": ["specific correction recommendations"],
+  "confidence_score": 0-100
+}
+Approve only if the plan is safe to execute with minor or no corrections."""
 
 
 def _extract_available_ambulances(
@@ -273,11 +291,7 @@ def verify_response_plan(
     routes: Dict[str, Any],
     context: Optional[SwarmContext] = None,
 ) -> Dict[str, Any]:
-    """
-    Run deterministic feasibility checks on the multi-agent response plan.
-
-    Rule-based only — no LLM dependency.
-    """
+    """Run deterministic feasibility checks on the multi-agent response plan."""
     print("[Verifier] Running operational feasibility checks")
     try:
         situation: Dict[str, Any] = context.situation if context else {}
@@ -314,7 +328,7 @@ def verify_response_plan(
         verification_status = "FAILED" if issues else "PASSED"
 
         output = {
-            "agent": AGENT_NAME,
+            "agent": "VerifierAgent",
             "system_message": SYSTEM_MESSAGE,
             "verification_status": verification_status,
             "issues_found": issues,
@@ -328,18 +342,18 @@ def verify_response_plan(
         if context is not None:
             context.verification = output
             context.add_log(
-                AGENT_NAME,
+                "VerifierAgent",
                 f"Verification {verification_status} "
                 f"(confidence {confidence_score}, "
                 f"{len(issues)} issue(s)).",
             )
 
-        print(f"[Verifier] Output:", json.dumps(output, indent=2))
+        print(f"[Verifier] Deterministic Output:", json.dumps(output, indent=2))
         return output
     except Exception as exc:
         print(f"[Verifier] Error: {exc}\n{traceback.format_exc()}")
         return {
-            "agent": AGENT_NAME,
+            "agent": "VerifierAgent",
             "verification_status": "FAILED",
             "issues_found": [{
                 "type": "VERIFIER_ERROR",
@@ -356,9 +370,200 @@ def verify_response_plan(
         }
 
 
+def _parse_approved(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "approved", "1")
+    return bool(value)
+
+
+def _parse_confidence(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, min(100, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _offline_verify(outputs: Dict[str, Any]) -> Dict[str, Any]:
+    issues = []
+    corrections = []
+    plan = outputs.get("plan", {})
+    triage = plan.get("triage", {})
+    zones = triage.get("zones", {})
+    assignments = plan.get("task_assignments", [])
+    alloc_list = outputs.get("allocations", {}).get("allocations", [])
+
+    if not zones:
+        issues.append("No triage zones identified.")
+        corrections.append("Re-run triage with explicit zone casualty counts.")
+    if assignments and len(assignments) != len(zones):
+        issues.append("Task assignment count does not match triage zones.")
+    for a in alloc_list:
+        if a.get("ambulances", 0) < 1:
+            issues.append(f"No ambulances allocated to {a.get('zone')}.")
+
+    approved = len(issues) == 0
+    confidence = 85 if approved else max(30, 70 - len(issues) * 15)
+    return {
+        "narrative": "Offline rule-based verification completed.",
+        "issues_found": issues,
+        "approved": approved,
+        "corrections": corrections,
+        "confidence_score": confidence,
+    }
+
+
+class VerifierAgent:
+    """Reviews full pipeline outputs before the Reporter publishes a SitRep."""
+
+    def verify(
+        self,
+        context: SwarmContext,
+        plan: Dict[str, Any],
+        allocations: Dict[str, Any],
+        routes: Dict[str, Any],
+        comms: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        print("[Verifier] Reviewing swarm outputs via LLM and rules")
+        try:
+            # 1. Run deterministic checks first
+            det_out = verify_response_plan(plan, allocations, routes, context)
+            
+            # 2. Run LLM check
+            payload = {
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "comms": comms,
+            }
+
+            def fallback():
+                return _offline_verify(payload)
+
+            user = context.prompt_block(json.dumps(payload, indent=2))
+            llm_out = agent_json_step(AGENT_NAME, VERIFIER_SYSTEM, user, fallback)
+
+            # 3. Merge outputs
+            det_issues = det_out.get("issues_found", [])
+            llm_issues_raw = llm_out.get("issues_found", [])
+            
+            # Standardize LLM issues to dicts
+            merged_issues_dict = list(det_issues)
+            for raw_issue in llm_issues_raw:
+                if isinstance(raw_issue, str):
+                    merged_issues_dict.append({
+                        "type": "LLM_SAFETY_WARNING",
+                        "severity": "MEDIUM",
+                        "message": raw_issue,
+                        "recommended_fix": "Review operational context."
+                    })
+                elif isinstance(raw_issue, dict):
+                    merged_issues_dict.append({
+                        "type": raw_issue.get("type", "LLM_SAFETY_WARNING"),
+                        "severity": raw_issue.get("severity", "MEDIUM"),
+                        "message": raw_issue.get("message", "Operational review recommended."),
+                        "recommended_fix": raw_issue.get("recommended_fix", "Review details.")
+                    })
+
+            # List of string issues for app.py
+            issues_found_str: List[str] = []
+            for issue in merged_issues_dict:
+                issues_found_str.append(f"[{issue['type']}] {issue['message']}")
+
+            # Corrections
+            corrections = list(det_out.get("recommendations", []))
+            for corr in llm_out.get("corrections", []):
+                if corr not in corrections:
+                    corrections.append(corr)
+
+            # approved / requires_human_approval logic
+            det_status = det_out.get("verification_status", "PASSED")
+            det_approved = (det_status == "PASSED")
+            llm_approved = _parse_approved(llm_out.get("approved", False))
+            
+            approved = det_approved and llm_approved
+            requires_human_approval = det_out.get("requires_human_approval", False) or (not approved)
+
+            # Confidence score: convert deterministic to 0-100 and combine
+            det_conf_100 = int(det_out.get("confidence_score", 1.0) * 100)
+            llm_conf_100 = _parse_confidence(llm_out.get("confidence_score", 0))
+            
+            # Use minimum confidence to be safe/conservative
+            merged_confidence = min(det_conf_100, llm_conf_100) if llm_conf_100 > 0 else det_conf_100
+
+            output = {
+                "agent": "VerifierAgent",
+                "system_message": SYSTEM_MESSAGE,
+                "narrative": llm_out.get("narrative", "Hybrid deterministic & LLM safety checks complete."),
+                "verification_status": "PASSED" if approved else "FAILED",
+                "issues_found": merged_issues_dict,      # satisfies reporter
+                "issues_found_str": issues_found_str,    # satisfies string-based rendering
+                "approved": approved,                    # satisfies dashboard
+                "corrections": corrections,              # satisfies dashboard
+                "recommendations": corrections,          # satisfies reporter / tests
+                "requires_human_approval": requires_human_approval,
+                "confidence_score": merged_confidence,   # satisfies dashboard (0-100)
+                "confidence_score_float": round(merged_confidence / 100.0, 2),  # satisfies float-based
+                "missing_data": det_out.get("missing_data", []),
+                "llm_used": llm_out.get("llm_used", False),
+                "model_used": llm_out.get("model_used", "offline"),
+                "latency_ms": llm_out.get("latency_ms", 0),
+            }
+            
+            if llm_out.get("llm_error"):
+                output["llm_error"] = llm_out["llm_error"]
+                
+            if context is not None:
+                context.verification = output
+                context.add_log(
+                    "VerifierAgent",
+                    f"Hybrid Verification {'PASSED' if approved else 'FAILED'} "
+                    f"(confidence {merged_confidence}%, {len(merged_issues_dict)} issue(s)).",
+                )
+                
+            print(f"[Verifier] Output:", json.dumps(output, indent=2))
+            return output
+        except Exception as e:
+            print(f"[Verifier] Error: {e}\n{traceback.format_exc()}")
+            return {
+                "agent": "VerifierAgent",
+                "verification_status": "FAILED",
+                "approved": False,
+                "issues_found": [{
+                    "type": "VERIFIER_ERROR",
+                    "severity": "HIGH",
+                    "message": str(e),
+                    "recommended_fix": "Fix error and retry.",
+                }],
+                "requires_human_approval": True,
+                "confidence_score": 0,
+                "error": str(e),
+            }
+
+
+def verify_outputs(
+    context: SwarmContext,
+    plan: Dict[str, Any],
+    allocations: Dict[str, Any],
+    routes: Dict[str, Any],
+    comms: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Module-level entry for orchestrators."""
+    return VerifierAgent().verify(context, plan, allocations, routes, comms)
+
+
 def agent_entry(message: Dict[str, Any]) -> Dict[str, Any]:
-    return verify_response_plan(
+    ctx = message.get("context")
+    if not isinstance(ctx, SwarmContext):
+        ctx = SwarmContext(
+            scenario_text=message.get("scenario_text", ""),
+            situation=message.get("situation", {}),
+        )
+    return verify_outputs(
+        ctx,
         message.get("plan", {}),
         message.get("allocations", {}),
         message.get("routes", {}),
+        message.get("comms", {}),
     )

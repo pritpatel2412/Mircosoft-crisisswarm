@@ -1,13 +1,17 @@
 """Swarm orchestration — digital twin, arena strategies, Groq-powered agents."""
-from typing import Dict, Any, List, Optional
+from __future__ import annotations
+
 import importlib
-import traceback
 import json
+import time
+import traceback
+from typing import Any, Dict, List, Optional
 
 from core import groq_client
 from core.context import SwarmContext
 from core.situation import parse_situation
 from core.analysis import build_analysis_payload
+from core.agent_llm import step_metadata
 from core.digital_twin import DisasterWorld
 from core.replay import CrisisReplay
 from core.human_gate import build_approval_record
@@ -20,10 +24,7 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
 
     situation = ctx.situation
     if situation.get("summary"):
-        transcript.append({
-            "agent": "Situation",
-            "message": situation["summary"],
-        })
+        transcript.append({"agent": "Situation", "message": situation["summary"]})
 
     forecast = outputs.get("forecast", {})
     if forecast.get("forecast_summary"):
@@ -122,24 +123,31 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
         })
 
     verification = outputs.get("verification", {})
-    if verification:
-        status = verification.get("verification_status", "UNKNOWN")
+    verifier = outputs.get("verifier", {}) or verification
+    if verifier:
+        if verifier.get("narrative"):
+            transcript.append({"agent": "Verifier", "message": verifier["narrative"]})
+        status = "APPROVED" if verifier.get("approved") else "NOT APPROVED"
+        score = verifier.get("confidence_score", 0)
+
+        # Handle issues format elegantly
+        raw_issues = verifier.get("issues_found", [])
+        issues_str_list = []
+        for issue in raw_issues:
+            if isinstance(issue, dict):
+                issues_str_list.append(f"[{issue.get('type')}] {issue.get('message')}")
+            else:
+                issues_str_list.append(str(issue))
+
         transcript.append({
             "agent": "Verifier",
-            "message": (
-                f"Verification {status} — confidence "
-                f"{verification.get('confidence_score', 0):.2f}, "
-                f"{len(verification.get('issues_found', []))} issue(s)."
-            ),
+            "message": f"{status} (confidence {score}%). " + "; ".join(issues_str_list[:3]),
         })
-        for issue in verification.get("issues_found", []):
-            transcript.append({
-                "agent": "Verifier",
-                "message": (
-                    f"[{issue.get('severity')}] {issue.get('type')}: "
-                    f"{issue.get('message')}"
-                ),
-            })
+        for fix in verifier.get("corrections", [])[:3]:
+            transcript.append({"agent": "Verifier", "message": f"Correction: {fix}"})
+        for fix in verifier.get("recommendations", [])[:3]:
+            if fix not in verifier.get("corrections", []):
+                transcript.append({"agent": "Verifier", "message": f"Correction: {fix}"})
 
     whatif = outputs.get("whatif", {})
     if whatif.get("recommendation"):
@@ -165,6 +173,39 @@ def build_transcript(ctx: SwarmContext, outputs: Dict[str, Any]) -> List[Dict[st
     return transcript
 
 
+def _situation_step(situation: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+    groq_live = situation.get("source") == "groq"
+    step: Dict[str, Any] = {
+        "agent": "Situation",
+        "llm_used": groq_live,
+        "model_used": groq_client.resolve_model() if groq_live else "offline",
+        "latency_ms": latency_ms,
+        "mode": "groq" if groq_live else "offline",
+        "llm_error": situation.get("parse_error"),
+    }
+    key_used = situation.get("key_used") or groq_client.get_last_key_used()
+    if groq_live and key_used is not None:
+        step["key_used"] = key_used
+    return step
+
+
+def _collect_agent_errors(outputs: Dict[str, Any]) -> List[str]:
+    """Surface per-agent failures that would otherwise be silent in the UI."""
+    errors: List[str] = []
+    for key, label in (
+        ("plan", "Commander"),
+        ("allocations", "Resource"),
+        ("routes", "Routing"),
+        ("comms", "Comms"),
+        ("verifier", "Verifier"),
+        ("report", "Reporter"),
+    ):
+        blob = outputs.get(key) or {}
+        if blob.get("error"):
+            errors.append(f"{label}: {blob['error']}")
+    return errors
+
+
 class SwarmManager:
     """Runs all agents in sequence with shared SwarmContext and Digital Twin."""
 
@@ -177,9 +218,15 @@ class SwarmManager:
         stop_before_finalize: bool = False,
         replay: Optional[CrisisReplay] = None,
     ) -> Dict[str, Any]:
+        """Complete end-to-end simulation tick including debate, digital twin, and scorecard."""
+        groq_client.reset_swarm_session()
+        agent_steps: List[Dict[str, Any]] = []
         try:
             print(f"[Swarm] Parsing disaster situation (strategy={strategy})...")
+            t0 = time.perf_counter()
             situation = parse_situation(scenario_text)
+            agent_steps.append(_situation_step(situation, int((time.perf_counter() - t0) * 1000)))
+
             ctx = SwarmContext(
                 scenario_text=scenario_text,
                 situation=situation,
@@ -210,28 +257,35 @@ class SwarmManager:
             print("[Swarm] Forecast...")
             forecast = forecast_mod.forecast_disaster(situation, world=world, context=ctx)
             replay.capture("forecast", world.to_dict(), forecast.get("forecast_summary", ""))
+            agent_steps.append(step_metadata(forecast, "Forecast"))
 
             print("[Swarm] Commander + Triage...")
             commander = getattr(commander_mod, "Commander")()
             plan = commander.run_triage_then_plan(scenario_text, context=ctx)
+            agent_steps.append(step_metadata(plan, "Commander"))
+
             triage = plan.get("triage", {})
             if triage:
                 world.apply_triage(triage)
+                agent_steps.append(step_metadata(triage, "Triage"))
             replay.capture("triage", world.to_dict(), "Casualty classification applied")
 
             print("[Swarm] Resource...")
             allocations = resource_mod.allocate_resources(plan, context=ctx)
             world.apply_resource(allocations, strategy=strategy)
             replay.capture("resource", world.to_dict(), allocations.get("narrative", ""))
+            agent_steps.append(step_metadata(allocations, "Resource"))
 
             print("[Swarm] Agent debate chamber...")
             debate = run_debate(plan, situation, context=ctx)
             replay.capture("debate", world.to_dict(), debate.get("outcome_summary", ""))
+            agent_steps.append(step_metadata(debate, "Debate"))
 
             print("[Swarm] Resource marketplace...")
             marketplace = marketplace_mod.request_mutual_aid(
                 allocations, world=world, context=ctx
             )
+            agent_steps.append(step_metadata(marketplace, "Marketplace"))
 
             print("[Swarm] Routing...")
             routes = routing_mod.plan_routes(
@@ -241,10 +295,12 @@ class SwarmManager:
             )
             world.apply_routing(routes)
             replay.capture("routing", world.to_dict(), routes.get("narrative", ""))
+            agent_steps.append(step_metadata(routes, "Routing"))
 
             trust = trust_mod.explain_decisions(
                 plan, allocations, routes, world=world, context=ctx
             )
+            agent_steps.append(step_metadata(trust, "Trust"))
 
             print("[Swarm] Comms...")
             comms = comms_mod.send_alerts(
@@ -255,24 +311,25 @@ class SwarmManager:
             )
             world.apply_comms(comms)
             replay.capture("comms", world.to_dict(), comms.get("narrative", ""))
+            agent_steps.append(step_metadata(comms, "Comms"))
 
             print("[Swarm] Multilingual alerts...")
             multilingual = multilingual_mod.generate_multilingual_alerts(
                 plan, comms=comms, context=ctx
             )
+            agent_steps.append(step_metadata(multilingual, "Multilingual"))
 
             print("[Swarm] Verifier...")
-            verification = verifier_mod.verify_response_plan(
-                plan,
-                allocations,
-                routes,
-                context=ctx,
-            )
+            # Use unified verifier
+            verification = verifier_mod.verify_outputs(ctx, plan, allocations, routes, comms)
+            verifier = verification
+            agent_steps.append(step_metadata(verification, "Verifier"))
 
             print("[Swarm] What-if optimizer...")
             whatif = whatif_mod.optimize_strategy(
                 world, plan, allocations, verification
             )
+            agent_steps.append(step_metadata(whatif, "WhatIf"))
             replay.capture(
                 "verification",
                 world.to_dict(),
@@ -284,6 +341,7 @@ class SwarmManager:
             analysis = build_analysis_payload(
                 scenario_text, plan, allocations, routes, context=ctx, comms=comms
             )
+            agent_steps.append(step_metadata(analysis, "Analysis"))
 
             metrics = world.compute_metrics(verification)
 
@@ -298,13 +356,17 @@ class SwarmManager:
                 "marketplace": marketplace,
                 "multilingual": multilingual,
                 "verification": verification,
+                "verifier": verifier,
                 "whatif": whatif,
                 "analysis": analysis,
+                "report": {},  # Fill subsequently
             }
+
+            groq_ok, groq_msg = groq_client.verify_connection(use_cache=True)
+            llm_agents = sum(1 for s in agent_steps if s.get("llm_used"))
 
             if stop_before_finalize:
                 transcript = build_transcript(ctx, {**outputs, "report": {}, "after_action": {}})
-                groq_ok, groq_msg = groq_client.verify_connection()
                 mode = "groq_multi_agent" if groq_ok else "offline_pipeline"
                 return {
                     "mode": mode,
@@ -320,6 +382,7 @@ class SwarmManager:
                     "scenario_text": scenario_text,
                     "pending_outputs": outputs,
                     "transcript": transcript,
+                    "agent_steps": agent_steps,
                     **outputs,
                 }
 
@@ -337,18 +400,14 @@ class SwarmManager:
             after_action = finalized["after_action"]
             human_approval = finalized.get("human_approval")
 
+            outputs["report"] = report
+            outputs["after_action"] = after_action
+
             transcript = build_transcript(ctx, {**outputs, "report": report, "after_action": after_action})
-
-            llm_agents = sum(
-                1
-                for o in (plan, allocations, routes, comms, report, analysis)
-                if isinstance(o, dict) and o.get("llm_used")
+            agent_errors = _collect_agent_errors(outputs)
+            mode = "groq_multi_agent" if llm_agents >= 3 else (
+                "groq_partial" if llm_agents > 0 else "offline_pipeline"
             )
-            if situation.get("source") == "groq":
-                llm_agents += 1
-
-            groq_ok, groq_msg = groq_client.verify_connection()
-            mode = "groq_multi_agent" if groq_ok else "offline_pipeline"
 
             return {
                 "mode": mode,
@@ -373,15 +432,133 @@ class SwarmManager:
                 "marketplace": marketplace,
                 "multilingual": multilingual,
                 "verification": verification,
+                "verifier": verifier,
                 "whatif": whatif,
                 "after_action": after_action,
                 "report": report,
                 "analysis": analysis,
                 "transcript": transcript,
+                "agent_steps": agent_steps,
                 "agents_with_llm": llm_agents,
+                "agent_errors": agent_errors,
             }
         except Exception:
-            return {"error": "SwarmManager failed", "trace": traceback.format_exc()}
+            return {"error": "Swarm run failed", "trace": traceback.format_exc()}
+
+    def run_partial_scenario(self, scenario_text: str) -> Dict[str, Any]:
+        """Support for split/interactive orchestrator runs (Streamlit sandbox)."""
+        groq_client.reset_swarm_session()
+        agent_steps: List[Dict[str, Any]] = []
+        try:
+            print("[Swarm] Running partial scenario...")
+            t0 = time.perf_counter()
+            situation = parse_situation(scenario_text)
+            agent_steps.append(_situation_step(situation, int((time.perf_counter() - t0) * 1000)))
+
+            ctx = SwarmContext(scenario_text=scenario_text, situation=situation)
+
+            commander_mod = importlib.import_module("agents.commander")
+            resource_mod = importlib.import_module("agents.resource")
+            routing_mod = importlib.import_module("agents.routing")
+
+            print("[Swarm] Commander + Triage...")
+            commander = getattr(commander_mod, "Commander")()
+            plan = commander.run_triage_then_plan(scenario_text, context=ctx)
+            agent_steps.append(step_metadata(plan, "Commander"))
+
+            triage = plan.get("triage") or {}
+            if triage:
+                agent_steps.append(step_metadata(triage, "Triage"))
+
+            print("[Swarm] Resource...")
+            allocations = resource_mod.allocate_resources(plan, context=ctx)
+            agent_steps.append(step_metadata(allocations, "Resource"))
+
+            print("[Swarm] Routing...")
+            routes = routing_mod.plan_routes(
+                plan.get("task_assignments", []),
+                context=ctx,
+                allocations=allocations,
+            )
+            agent_steps.append(step_metadata(routes, "Routing"))
+
+            return {
+                "situation": situation,
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "agent_steps": agent_steps,
+            }
+        except Exception:
+            return {"error": "Partial Swarm failed", "trace": traceback.format_exc()}
+
+    def run_complete_scenario(self, partial_out: Dict[str, Any], scenario_text: str) -> Dict[str, Any]:
+        """Execute remaining agents in interactive sandbox run."""
+        agent_steps = partial_out.get("agent_steps", [])
+        situation = partial_out.get("situation", {})
+        plan = partial_out.get("plan", {})
+        allocations = partial_out.get("allocations", {})
+        routes = partial_out.get("routes", {})
+
+        try:
+            ctx = SwarmContext(scenario_text=scenario_text, situation=situation)
+
+            comms_mod = importlib.import_module("agents.comms")
+            verifier_mod = importlib.import_module("agents.verifier")
+            reporter_mod = importlib.import_module("agents.reporter")
+
+            print("[Swarm] Comms...")
+            comms = comms_mod.send_alerts(
+                context=ctx,
+                plan=plan,
+                allocations=allocations,
+                routes=routes,
+            )
+            agent_steps.append(step_metadata(comms, "Comms"))
+
+            print("[Swarm] Verifier...")
+            verifier = verifier_mod.verify_outputs(ctx, plan, allocations, routes, comms)
+            agent_steps.append(step_metadata(verifier, "Verifier"))
+
+            print("[Swarm] Final operational analysis...")
+            analysis = build_analysis_payload(
+                scenario_text, plan, allocations, routes, context=ctx, comms=comms
+            )
+            agent_steps.append(step_metadata(analysis, "Analysis"))
+
+            print("[Swarm] Reporter...")
+            # Unify verification keys
+            report = reporter_mod.generate_report(
+                plan,
+                allocations,
+                routes,
+                context=ctx,
+                comms=comms,
+                analysis=analysis,
+                verifier=verifier,
+                verification=verifier,
+            )
+            agent_steps.append(step_metadata(report, "Reporter"))
+
+            llm_agents = sum(1 for s in agent_steps if s.get("llm_used"))
+
+            return {
+                "groq_live": llm_agents > 0,
+                "groq_status": f"{llm_agents} of {len(agent_steps)} agents used Groq",
+                "groq_model": groq_client.resolve_model() if groq_client.is_configured() else None,
+                "situation": situation,
+                "plan": plan,
+                "allocations": allocations,
+                "routes": routes,
+                "comms": comms,
+                "verifier": verifier,
+                "verification": verifier,
+                "analysis": analysis,
+                "report": report,
+                "agent_steps": agent_steps,
+            }
+        except Exception:
+            return {"error": "Complete Swarm failed", "trace": traceback.format_exc()}
 
     def _finalize_mission(
         self,
@@ -441,11 +618,11 @@ def run_swarm(
     await_human_approval: bool = True,
 ) -> Dict[str, Any]:
     if groq_client.is_configured():
-        ok, msg = groq_client.verify_connection()
+        ok, msg = groq_client.verify_connection(use_cache=True)
         if ok:
-            print(f"[Swarm] Groq LIVE — {msg}")
+            print(f"[Swarm] Groq configured — {msg}")
         else:
-            print(f"[Swarm] OFFLINE MODE (API failed): {msg}")
+            print(f"[Swarm] Groq ping failed (agents may use offline fallbacks): {msg}")
     else:
         print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
 
@@ -462,8 +639,7 @@ def finalize_mission(
     officer: str = "Incident Commander",
     notes: str = "",
 ) -> Dict[str, Any]:
-    """
-    Complete a paused mission after human approval or rejection.
+    """Complete a paused mission after human approval or rejection.
 
     decision: 'approved' | 'rejected'
     """
@@ -511,11 +687,18 @@ def finalize_mission(
                 "human_approval": approval,
                 "payload": {"status": "rejected", "verification": verification},
             }
+            # Extract issue messages
+            issue_messages = []
+            for i in verification.get("issues_found", []):
+                if isinstance(i, dict):
+                    issue_messages.append(i.get("message", ""))
+                else:
+                    issue_messages.append(str(i))
             after_action = {
                 "agent": "AfterActionReview",
                 "mission_score": 0,
                 "summary": "Mission halted — human rejected plan after verifier flags.",
-                "mistakes": [i.get("message") for i in verification.get("issues_found", [])],
+                "mistakes": issue_messages,
                 "improvement": "Address verifier issues and re-run swarm.",
                 "potential_lives_saved": "+0",
             }
@@ -577,6 +760,23 @@ def run_aftershock_rerun(
         round_label="after_aftershock",
         stop_before_finalize=True,
     )
+
+
+def run_swarm_partial(disaster_message: str) -> Dict[str, Any]:
+    if groq_client.is_configured():
+        ok, msg = groq_client.verify_connection(use_cache=True)
+        if ok:
+            print(f"[Swarm] Groq configured — {msg}")
+        else:
+            print(f"[Swarm] Groq ping failed (agents may use offline fallbacks): {msg}")
+    else:
+        print("[Swarm] OFFLINE MODE — set GROQ_API_KEY for AI agents.")
+
+    return SwarmManager().run_partial_scenario(disaster_message)
+
+
+def run_swarm_complete(partial_out: Dict[str, Any], disaster_message: str) -> Dict[str, Any]:
+    return SwarmManager().run_complete_scenario(partial_out, disaster_message)
 
 
 if __name__ == "__main__":
