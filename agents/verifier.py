@@ -117,15 +117,13 @@ def _route_uses_blocked_road(
     route: Dict[str, Any],
     blocked_routes: List[str],
 ) -> bool:
+    """
+    Only flag a route as using a blocked road when the route status itself
+    is 'blocked'. Rationale text often *mentions* blocked roads while
+    explaining the alternate path — matching that text produces false positives.
+    """
     status = str(route.get("status", "")).lower()
-    if status == "blocked":
-        return True
-    rationale = str(route.get("rationale", "")).lower()
-    for blocked in blocked_routes:
-        blocked_lower = str(blocked).lower()
-        if blocked_lower and blocked_lower in rationale:
-            return True
-    return False
+    return status == "blocked"
 
 
 def _check_route_conflicts(

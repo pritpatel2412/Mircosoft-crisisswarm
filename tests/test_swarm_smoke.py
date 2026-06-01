@@ -10,16 +10,23 @@ class TestSwarmSmoke(unittest.TestCase):
     @patch("core.groq_client.verify_connection", return_value=(False, "GROQ_API_KEY is not set in .env"))
     @patch("core.groq_client.is_configured", return_value=False)
     def test_run_swarm_offline(self, _is_configured, _verify_connection):
-        result = run_swarm(load_demo_scenario())
+        result = run_swarm(load_demo_scenario(), await_human_approval=False)
         self.assertNotIn("error", result)
         for key in (
             "mode",
             "situation",
+            "digital_twin",
+            "metrics",
+            "replay",
+            "status",
             "plan",
             "allocations",
             "routes",
             "comms",
+            "forecast",
             "verification",
+            "whatif",
+            "after_action",
             "report",
             "analysis",
             "transcript",

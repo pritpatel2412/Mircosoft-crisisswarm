@@ -1,0 +1,455 @@
+/* 
+ * CrisisSwarm Premium UI Stylesheet
+ * Brand Theme: CrisisSwarm (Frontier AI. In your hands.)
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* --- Variable Declarations --- */
+:root {
+  --colors-primary: #FF5A36;
+  --colors-primary-deep: #D33E1D;
+  --colors-sunshine-300: #FFECE5;
+  --colors-sunshine-500: #FF9E2C;
+  --colors-sunshine-700: #FF3E1B;
+  --colors-yellow-saturated: #FFD15C;
+  
+  --colors-cream: #FDF8F0;
+  --colors-cream-soft: #F9F6F0;
+  --colors-cream-deeper: #EBE4D5;
+  --colors-beige-deep: #E8E2D7;
+  
+  --colors-canvas: #FFFFFF;
+  --colors-surface: #FAF9F6;
+  --colors-surface-cream: #FFFDF9;
+  --colors-surface-code: #131317;
+  
+  --colors-hairline: rgba(0, 0, 0, 0.08);
+  --colors-hairline-soft: rgba(0, 0, 0, 0.04);
+  --colors-hairline-strong: rgba(0, 0, 0, 0.15);
+  
+  --colors-ink: #111111;
+  --colors-ink-tint: #2C2C2C;
+  --colors-charcoal: #333333;
+  --colors-slate: #555555;
+  --colors-steel: #777777;
+  --colors-stone: #888888;
+}
+
+/* --- Base Body & Scrollbar Typography --- */
+html, body, [class*="css"] {
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color: var(--colors-ink);
+  background-color: var(--colors-canvas);
+}
+
+/* --- Headings Pairing --- */
+h1, h2, h3, .serif-font {
+  font-family: 'Playfair Display', 'Times New Roman', Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.5px;
+}
+
+h4, h5, h6, .sans-font {
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+}
+
+/* --- Streamlit Element Overrides --- */
+
+/* Sidebar styled with Warm Cream Soft surface */
+[data-testid="stSidebar"] {
+  background-color: var(--colors-cream-soft) !important;
+  border-right: 1px solid var(--colors-beige-deep) !important;
+}
+
+/* Input Fields overrides */
+div[data-baseweb="input"] {
+  background-color: var(--colors-canvas) !important;
+  border: 1px solid var(--colors-hairline-strong) !important;
+  border-radius: 8px !important;
+}
+
+div[data-baseweb="input"]:focus-within {
+  border: 2px solid var(--colors-primary) !important;
+}
+
+/* Buttons styling - Editorial rectangular buttons */
+button, div[data-testid="stFormSubmitButton"] button {
+  border-radius: 8px !important;
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 500 !important;
+  font-size: 14px !important;
+  letter-spacing: 0px !important;
+  padding: 10px 20px !important;
+  transition: all 0.2s ease-in-out !important;
+  text-transform: none !important;
+}
+
+/* Primary Button Styling */
+button[kind="primary"] {
+  background-color: var(--colors-primary) !important;
+  color: white !important;
+  border: none !important;
+}
+button[kind="primary"]:active {
+  background-color: var(--colors-primary-deep) !important;
+}
+
+/* Secondary Button Styling */
+button[kind="secondary"] {
+  background-color: transparent !important;
+  color: var(--colors-ink) !important;
+  border: 1px solid var(--colors-hairline-strong) !important;
+}
+
+/* --- Premium Layout & Custom Components --- */
+
+/* Promo banner ABOVE top nav */
+.promo-banner {
+  background-color: var(--colors-ink);
+  color: white;
+  text-align: center;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  width: 100%;
+}
+
+.promo-banner a {
+  color: var(--colors-primary);
+  text-decoration: none;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.promo-banner a:hover {
+  text-decoration: underline;
+}
+
+/* Sticky top navigation */
+.top-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 64px;
+  padding: 0 40px;
+  background-color: var(--colors-canvas);
+  border-bottom: 1px solid var(--colors-hairline-soft);
+  position: sticky;
+  top: 0;
+  z-index: 999;
+}
+
+.top-nav-logo {
+  font-family: 'Playfair Display', serif;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--colors-ink);
+  text-decoration: none;
+}
+
+.top-nav-links {
+  display: flex;
+  gap: 24px;
+}
+
+.top-nav-links a {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--colors-slate);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.top-nav-links a:hover {
+  color: var(--colors-ink);
+}
+
+.top-nav-cta {
+  background-color: var(--colors-primary);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.top-nav-cta:hover {
+  background-color: var(--colors-primary-deep);
+}
+
+/* --- Hero Sunset Band --- */
+.hero-band-sunset {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 80px 40px;
+  background: linear-gradient(135deg, var(--colors-sunshine-700) 0%, #7d1c0a 50%, var(--colors-ink) 100%);
+  background-size: cover;
+  background-position: center;
+  border-radius: 16px;
+  color: white;
+  margin-bottom: 40px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--colors-hairline) 0px 12px 24px -4px;
+}
+
+/* Overlay photographic gradient lights */
+.hero-band-sunset::before {
+  content: "";
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  background: radial-gradient(circle at 80% 20%, rgba(255, 158, 44, 0.25) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+.hero-left {
+  flex: 1.2;
+  z-index: 2;
+  padding-right: 40px;
+}
+
+.hero-right {
+  flex: 0.8;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.hero-display-text {
+  font-family: 'Playfair Display', serif;
+  font-size: 68px;
+  line-height: 1.05;
+  font-weight: 400;
+  letter-spacing: -2px;
+  margin-bottom: 16px;
+  color: #FFFFFF;
+}
+
+.hero-subtitle-text {
+  font-size: 18px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 32px;
+  max-width: 600px;
+}
+
+/* --- Cards Styling --- */
+.card-base {
+  background-color: var(--colors-canvas);
+  border-radius: 12px;
+  padding: 24px;
+  border: 1px solid var(--colors-hairline-soft);
+  box-shadow: rgba(0, 0, 0, 0.02) 0px 4px 12px;
+  margin-bottom: 20px;
+}
+
+.card-cream {
+  background-color: var(--colors-cream);
+  color: var(--colors-ink);
+  border-radius: 12px;
+  padding: 32px;
+  border: 1px solid var(--colors-beige-deep);
+  box-shadow: rgba(0, 0, 0, 0.03) 0px 4px 16px;
+  margin-bottom: 24px;
+}
+
+.card-cream-soft {
+  background-color: var(--colors-cream-soft);
+  color: var(--colors-ink);
+  border-radius: 12px;
+  padding: 24px;
+  border: 1px solid var(--colors-beige-deep);
+  margin-bottom: 20px;
+}
+
+.card-photographic {
+  background-color: var(--colors-surface-code);
+  color: white;
+  border-radius: 12px;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: rgba(0, 0, 0, 0.12) 0px 16px 36px -8px;
+  margin-bottom: 24px;
+}
+
+/* --- Metrics Restyling --- */
+.metric-container {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--colors-canvas);
+  border: 1px solid var(--colors-hairline-soft);
+  border-radius: 12px;
+  padding: 16px 20px;
+  box-shadow: rgba(0, 0, 0, 0.02) 0px 2px 8px;
+  min-width: 150px;
+}
+
+.metric-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--colors-steel);
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-family: 'Playfair Display', serif;
+  font-size: 38px;
+  font-weight: 600;
+  color: var(--colors-ink);
+  line-height: 1.1;
+}
+
+/* --- Sunset Stripe Band (Primary Brand Recognizer) --- */
+.sunset-stripe-band {
+  background: linear-gradient(90deg, 
+    var(--colors-primary-deep) 0%, 
+    var(--colors-primary) 25%, 
+    var(--colors-sunshine-500) 50%, 
+    var(--colors-yellow-saturated) 75%, 
+    var(--colors-cream) 100%
+  );
+  height: 8px;
+  width: 100%;
+  margin-top: 60px;
+  margin-bottom: 0px;
+  border-radius: 4px;
+}
+
+/* --- Multi-Column Cream Footer --- */
+.footer-region {
+  background-color: var(--colors-cream);
+  border-top: 1px solid var(--colors-beige-deep);
+  padding: 64px 40px;
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr;
+  gap: 40px;
+  font-size: 14px;
+  color: var(--colors-slate);
+}
+
+.footer-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.footer-col-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--colors-ink);
+  margin-bottom: 20px;
+}
+
+.footer-col a {
+  color: var(--colors-slate);
+  text-decoration: none;
+  margin-bottom: 10px;
+  transition: color 0.15s ease;
+}
+
+.footer-col a:hover {
+  color: var(--colors-primary);
+}
+
+.footer-bottom {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid var(--colors-beige-deep);
+  padding-top: 32px;
+  margin-top: 32px;
+  font-size: 12px;
+  color: var(--colors-steel);
+}
+
+/* --- Badges & Status Chips --- */
+.badge-orange {
+  display: inline-block;
+  background-color: var(--colors-primary);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  text-transform: uppercase;
+}
+
+.badge-cream {
+  display: inline-block;
+  background-color: var(--colors-cream-deeper);
+  color: var(--colors-ink);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+}
+
+.badge-dark {
+  display: inline-block;
+  background-color: var(--colors-ink);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+}
+
+/* --- Code Editor styling --- */
+.code-block-header {
+  background-color: #1a1a22;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-family: 'Inter', sans-serif;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.code-block-content {
+  background-color: var(--colors-surface-code);
+  font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  font-size: 13px;
+  padding: 16px;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  overflow-x: auto;
+  color: #e6e6e6;
+  margin-bottom: 20px;
+}
+
+/* Responsive adjustment for Mobile stacking */
+@media (max-width: 768px) {
+  .hero-band-sunset {
+    flex-direction: column;
+    padding: 48px 24px;
+  }
+  .hero-left {
+    padding-right: 0px;
+    margin-bottom: 32px;
+  }
+  .hero-display-text {
+    font-size: 40px;
+  }
+  .footer-region {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+}

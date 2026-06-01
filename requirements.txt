@@ -8,3 +8,5 @@ azure-maps-route
 azure-identity
 pydeck
 pandas
+fastapi>=0.100.0
+uvicorn>=0.20.0

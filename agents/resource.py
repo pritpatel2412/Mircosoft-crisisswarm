@@ -31,9 +31,23 @@ RESOURCE_SYSTEM = """You are a disaster resource allocator. Return JSON:
 Scale resources to casualties and task urgency. Minimum 1 ambulance per zone with casualties."""
 
 
-def _heuristic_allocations(plan: Dict[str, Any]) -> Dict[str, Any]:
+def _heuristic_allocations(
+    plan: Dict[str, Any],
+    strategy: str = "default",
+) -> Dict[str, Any]:
     allocations: List[Dict[str, Any]] = []
-    for a in plan.get("task_assignments", []):
+    tasks = plan.get("task_assignments", [])
+    if strategy == "medical_first":
+        tasks = sorted(
+            tasks,
+            key=lambda t: (
+                (plan.get("triage", {}).get("zones", {}).get(t.get("zone"), {}) or {})
+                .get("breakdown", {})
+                .get("Critical", 0)
+            ),
+            reverse=True,
+        )
+    for a in tasks:
         zone = a.get("zone")
         est = a.get("est_total", 0)
         ambulances, medical_teams, shelters = 0, 0, 0
@@ -46,6 +60,17 @@ def _heuristic_allocations(plan: Dict[str, Any]) -> Dict[str, Any]:
                 medical_teams += max(1, units)
             if ttype == "shelter":
                 shelters += max(1, units)
+        if strategy == "medical_first":
+            br = (
+                plan.get("triage", {}).get("zones", {}).get(zone, {}).get("breakdown", {})
+            )
+            crit = int(br.get("Critical", 1))
+            ambulances = max(ambulances, min(12, crit // 2 + 2))
+            medical_teams = max(medical_teams, crit // 3 + 1)
+        elif strategy == "resource_balanced":
+            ambulances = max(2, ambulances)
+            medical_teams = max(2, medical_teams)
+
         allocations.append({
             "zone": zone,
             "estimated_total": est,
@@ -53,9 +78,10 @@ def _heuristic_allocations(plan: Dict[str, Any]) -> Dict[str, Any]:
             "medical_teams": max(1, medical_teams),
             "shelters": max(1, shelters),
             "water_kits": max(10, int(est / 10)),
-            "rationale": f"Heuristic allocation for {est} casualties in {zone}.",
+            "rationale": f"Heuristic allocation ({strategy}) for {est} casualties in {zone}.",
         })
-    return {"narrative": "Heuristic resource allocation.", "allocations": allocations}
+    narrative = f"Heuristic resource allocation ({strategy})."
+    return {"narrative": narrative, "allocations": allocations}
 
 
 def allocate_resources(
@@ -65,8 +91,10 @@ def allocate_resources(
     print("[Resource] Allocating with commander plan and situation context")
     try:
 
+        strategy = context.strategy if context else "default"
+
         def fallback():
-            return _heuristic_allocations(plan)
+            return _heuristic_allocations(plan, strategy=strategy)
 
         user = json.dumps({"commander_plan": plan}, indent=2)
         if context:
